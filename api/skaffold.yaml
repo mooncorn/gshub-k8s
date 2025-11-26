@@ -1,0 +1,27 @@
+apiVersion: skaffold/v1beta15
+kind: Config
+metadata:
+  name: gshub-api
+
+build:
+  artifacts:
+  - image: gshub-api
+    context: .
+    docker:
+      dockerfile: Dockerfile
+    sync:
+      manual:
+      - src: "**/*.go"
+        dest: /app
+
+deploy:
+  kubectl:
+    manifests:
+    - ../k8s/gshub/api.yaml
+
+portForward:
+- resourceType: service
+  resourceName: api
+  namespace: gshub
+  port: 8080
+  localPort: 8080

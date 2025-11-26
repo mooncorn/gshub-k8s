@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gshub
+  labels:
+    name: gshub
+    purpose: backend-services
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gameservers
+  labels:
+    name: gameservers
+    purpose: game-hosting
