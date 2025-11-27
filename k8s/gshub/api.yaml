@@ -26,6 +26,7 @@ spec:
       labels:
         app: api
     spec:
+      serviceAccountName: gshub-api
       containers:
       - name: api
         image: gshub-api

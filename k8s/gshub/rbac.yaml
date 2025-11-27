@@ -1,0 +1,68 @@
+# RBAC Configuration for Game Platform API
+# This gives the API pod permission to manage Kubernetes resources
+
+---
+# ServiceAccount: The "identity" for the API pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gshub-api
+  namespace: gshub
+  labels:
+    app: gshub-api
+
+---
+# ClusterRole: The "job description" - what permissions are available
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gshub-api
+  labels:
+    app: gshub-api
+rules:
+  # Permissions for managing game server pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete", "watch"]
+
+  # Permissions for reading pod logs (for console feature)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Permissions for managing persistent storage
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+
+  # Permissions for reading node information (to get public IPs)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+
+  # Permissions for managing Agones GameServers
+  - apiGroups: ["agones.dev"]
+    resources: ["gameservers"]
+    verbs: ["get", "list", "create", "update", "delete", "watch"]
+
+  # Permissions for reading GameServer status
+  - apiGroups: ["agones.dev"]
+    resources: ["gameservers/status"]
+    verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding: The "job assignment" - connecting the identity to permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gshub-api
+  labels:
+    app: gshub-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gshub-api
+subjects:
+  - kind: ServiceAccount
+    name: gshub-api
+    namespace: gshub

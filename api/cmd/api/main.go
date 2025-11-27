@@ -1,18 +1,20 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/mooncorn/gshub/api/config"
+	"github.com/mooncorn/gshub/api/internal/api"
 	"github.com/mooncorn/gshub/api/internal/database"
-	"github.com/mooncorn/gshub/api/internal/handlers"
-	"github.com/mooncorn/gshub/api/internal/middleware"
+	"github.com/mooncorn/gshub/api/internal/services/k8s"
 )
 
 func main() {
 	// Load .env file (ignore error in production)
+	// TODO: Move to config and log this ^
 	_ = godotenv.Load()
 
 	// Load config
@@ -22,7 +24,7 @@ func main() {
 	}
 
 	// Connect to database
-	database, err := database.NewDB(cfg.DatabaseURL)
+	database, err := database.Connect(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
@@ -30,38 +32,25 @@ func main() {
 
 	log.Println("Connected to database successfully")
 
-	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(database, cfg.JWTSecret)
+	// Initialize Kubernetes client
+	ctx := context.Background()
+	k8sClient, err := k8s.NewClient()
+	if err != nil {
+		log.Fatal("Failed to initialize K8s client:", err)
+	}
 
-	// Setup router
+	log.Println("Kubernetes client initialized successfully")
+
+	// Test K8s connectivity
+	if err := k8sClient.Health(ctx); err != nil {
+		log.Fatal("K8s health check failed:", err)
+	}
+
+	log.Println("Connected to Kubernetes API successfully")
+
+	handlers := api.NewHandlers(database, cfg, k8sClient)
 	r := gin.Default()
-
-	// Health check
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
-
-	// Public routes
-	auth := r.Group("/auth")
-	{
-		auth.POST("/register", authHandler.Register)
-		auth.POST("/login", authHandler.Login)
-	}
-
-	// Protected routes
-	api := r.Group("/api")
-	api.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-	{
-		api.GET("/me", func(c *gin.Context) {
-			userID, _ := c.Get("user_id")
-			email := c.GetString("email")
-			c.JSON(200, gin.H{
-				"user_id": userID,
-				"email":   email,
-			})
-		})
-		// Server endpoints will go here later
-	}
+	handlers.RegisterRoutes(r)
 
 	// Start server
 	log.Printf("Starting server on :%s", cfg.Port)
