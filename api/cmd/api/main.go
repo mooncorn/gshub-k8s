@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/api"
@@ -16,6 +19,11 @@ func main() {
 	// Load .env file (ignore error in production)
 	// TODO: Move to config and log this ^
 	_ = godotenv.Load()
+
+	// Register custom validators
+	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		v.RegisterValidation("dns", validateDNS)
+	}
 
 	// Load config
 	cfg, err := config.Load()
@@ -57,4 +65,15 @@ func main() {
 	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatal("Failed to start server:", err)
 	}
+}
+
+// validateDNS validates that a string is a valid DNS subdomain
+// DNS subdomains can contain letters, numbers, and hyphens
+// They cannot start or end with a hyphen
+func validateDNS(fl validator.FieldLevel) bool {
+	dns := fl.Field().String()
+	// Valid DNS subdomain pattern: alphanumeric and hyphens, cannot start or end with hyphen
+	pattern := `^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`
+	regex := regexp.MustCompile(pattern)
+	return regex.MatchString(dns)
 }

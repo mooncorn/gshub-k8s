@@ -83,7 +83,7 @@ const (
 type CreateServerRequest struct {
 	DisplayName string `json:"display_name" binding:"omitempty,min=3,max=50"` // Optional
 	Subdomain   string `json:"subdomain" binding:"required,min=3,max=50,dns"`
-	Game        string `json:"game" binding:"required,oneof=minecraft valheim rust ark"`
+	Game        string `json:"game" binding:"required,oneof=minecraft valheim"`
 	Plan        string `json:"plan" binding:"required,oneof=small medium large"`
 }
 

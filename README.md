@@ -5,6 +5,7 @@
 #### Prerequisites 
 - Docker
 - K3d
+- Stripe CLI
 
 #### Setup
 ##### Create cluster
@@ -38,6 +39,20 @@ kubectl apply -f ./k8s/gshub/game-catalog.yaml
 kubectl apply -f ./k8s/gshub/rbac.yaml
 kubectl apply -f ./k8s/gshub/postgresql.yaml
 ```
+
+#### Setup Stripe products and webhook
+```
+stripe listen --forward-to localhost:3000/webhook
+```
+
+### Get Mailersend API key
+
+#### Set environment variables
+
+Refer to:
+ - /k8s/secrets.yaml
+ - /k8s/gshub/api.yaml
+
 #### Run the app
 ```
 cd api

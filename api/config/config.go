@@ -35,6 +35,7 @@ type Config struct {
 	StripeHobbyPriceID      string
 	StripeProPriceID        string
 	StripeEnterprisePriceID string
+	StripePrices            map[string]map[string]string // game -> plan -> priceID
 
 	FrontendURL string
 }
@@ -53,6 +54,18 @@ func Load() (*Config, error) {
 		dbUser, dbPassword, dbHost, dbPort, dbName, dbSSLMode,
 	)
 
+	// Initialize stripe prices map
+	stripePrices := make(map[string]map[string]string)
+	stripePrices["minecraft"] = map[string]string{
+		"small":  getEnv("STRIPE_PRICE_MINECRAFT_SMALL", ""),
+		"medium": getEnv("STRIPE_PRICE_MINECRAFT_MEDIUM", ""),
+		"large":  getEnv("STRIPE_PRICE_MINECRAFT_LARGE", ""),
+	}
+	stripePrices["valheim"] = map[string]string{
+		"small":  getEnv("STRIPE_PRICE_VALHEIM_SMALL", ""),
+		"medium": getEnv("STRIPE_PRICE_VALHEIM_MEDIUM", ""),
+	}
+
 	cfg := &Config{
 		Environment: getEnv("ENVIRONMENT", "development"),
 
@@ -70,11 +83,9 @@ func Load() (*Config, error) {
 		MailerSendFromEmail: getEnv("MAILERSEND_FROM_EMAIL", "noreply@gshub.pro"),
 		MailerSendFromName:  getEnv("MAILERSEND_FROM_NAME", "GSHUB.PRO"),
 
-		StripeSecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
-		StripeWebhookSecret:     getEnv("STRIPE_WEBHOOK_SECRET", ""),
-		StripeHobbyPriceID:      getEnv("STRIPE_HOBBY_PRICE_ID", ""),
-		StripeProPriceID:        getEnv("STRIPE_PRO_PRICE_ID", ""),
-		StripeEnterprisePriceID: getEnv("STRIPE_ENTERPRISE_PRICE_ID", ""),
+		StripeSecretKey:     getEnv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
+		StripePrices:        stripePrices,
 
 		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:3000"),
 	}
@@ -110,4 +121,19 @@ func parseDuration(value string, defaultValue time.Duration) time.Duration {
 		return defaultValue
 	}
 	return duration
+}
+
+// GetPriceID returns the Stripe price ID for a given game and plan
+func (c *Config) GetPriceID(game, plan string) (string, error) {
+	gamePrices, ok := c.StripePrices[game]
+	if !ok {
+		return "", fmt.Errorf("game %s not configured in prices", game)
+	}
+
+	priceID, ok := gamePrices[plan]
+	if !ok || priceID == "" {
+		return "", fmt.Errorf("price not configured for game %s, plan %s", game, plan)
+	}
+
+	return priceID, nil
 }

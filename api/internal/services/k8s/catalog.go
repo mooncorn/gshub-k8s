@@ -38,11 +38,9 @@ type GameVolume struct {
 // PlanConfig holds configuration for a specific plan (size)
 type PlanConfig struct {
 	Name    string `yaml:"name"`
-	Players string `yaml:"players"`
 	CPU     string `yaml:"cpu"`
 	Memory  string `yaml:"memory"`
 	Storage string `yaml:"storage"`
-	Price   int    `yaml:"price"`
 }
 
 // LoadGameCatalog reads the game-catalog ConfigMap from Kubernetes

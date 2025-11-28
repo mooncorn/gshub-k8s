@@ -23,25 +23,19 @@ data:
         plans:
           small:
             name: "Small"
-            players: "2-5"
             cpu: "1"
             memory: "2Gi"
             storage: "5Gi"
-            price: 300
           medium:
             name: "Medium"
-            players: "5-15"
             cpu: "2"
             memory: "4Gi"
             storage: "10Gi"
-            price: 600
           large:
             name: "Large"
-            players: "15-30"
             cpu: "4"
             memory: "8Gi"
             storage: "20Gi"
-            price: 1200
 
       valheim:
         name: "Valheim"
@@ -62,15 +56,11 @@ data:
         plans:
           small:
             name: "Small"
-            players: "2-4"
             cpu: "2"
             memory: "4Gi"
             storage: "5Gi"
-            price: 500
           medium:
             name: "Medium"
-            players: "4-8"
             cpu: "3"
             memory: "6Gi"
             storage: "10Gi"
-            price: 800

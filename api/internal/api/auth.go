@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -88,6 +89,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// Send verification email
 	if err := h.emailService.SendVerificationEmail(user.Email, verificationToken); err != nil {
 		// Log error but don't fail registration
+		log.Printf("failed to send verification email: %v", err)
 		c.JSON(http.StatusCreated, gin.H{
 			"message": "user created but failed to send verification email",
 			"user":    user.ToResponse(),

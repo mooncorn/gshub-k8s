@@ -53,10 +53,43 @@ spec:
             secretKeyRef:
               name: gshub-secrets
               key: jwt-secret
+        - name: JWT_ACCESS_EXPIRY
+          value: 15m
+        - name: JWT_REFRESH_EXPIRY
+          value: 168h
+        - name: MAILERSEND_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gshub-secrets
+              key: mailersend-api-key
+        - name: MAILERSEND_FROM_EMAIL
+          value: noreply@test-eqvygm01kk5l0p7w.mlsender.net
+        - name: MAILERSEND_FROM_NAME
+          value: GSHUB.PRO
+        - name: STRIPE_SECRET_KEY
+          valueFrom: 
+            secretKeyRef:
+              name: gshub-secrets
+              key: stripe-secret-key
+        - name: STRIPE_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: gshub-secrets
+              key: stripe-webhook-secret
         - name: PORT
           value: "8080"
         - name: ENVIRONMENT
           value: "development"
+        - name: STRIPE_PRICE_MINECRAFT_SMALL
+          value: price_1SYIpYHZ9OqKsVm0GfpdL0QP
+        - name: STRIPE_PRICE_MINECRAFT_MEDIUM
+          value: price_1SYIppHZ9OqKsVm0FjGG0QRA
+        - name: STRIPE_PRICE_MINECRAFT_LARGE
+          value: price_1SYIq4HZ9OqKsVm0OVAJfQaK
+        - name: STRIPE_PRICE_VALHEIM_SMALL
+          value: price_1SYIqHHZ9OqKsVm0sETquzPF
+        - name: STRIPE_PRICE_VALHEIM_MEDIUM
+          value: price_1SYIqYHZ9OqKsVm0qF7yVlAk
         resources:
           requests:
             cpu: "100m"
