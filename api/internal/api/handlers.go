@@ -31,6 +31,12 @@ func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client) *Ha
 func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api/v1")
 
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"status": "healthy",
+		})
+	})
+
 	// Auth routes (public)
 	authRoutes := api.Group("/auth")
 	{
