@@ -8,7 +8,7 @@ build:
   - image: gshub-api
     context: .
     docker:
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     sync:
       manual:
       - src: "**/*.go"
