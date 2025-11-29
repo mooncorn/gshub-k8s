@@ -6,12 +6,12 @@ import (
 	"log"
 
 	"github.com/google/uuid"
-	"github.com/stripe/stripe-go/v84"
-	"github.com/stripe/stripe-go/v84/checkout/session"
-	"github.com/stripe/stripe-go/v84/webhook"
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
+	"github.com/stripe/stripe-go/v84"
+	"github.com/stripe/stripe-go/v84/checkout/session"
+	"github.com/stripe/stripe-go/v84/webhook"
 )
 
 type Service struct {
@@ -31,9 +31,9 @@ func NewService(db *database.DB, cfg *config.Config) *Service {
 func (s *Service) CreateCheckoutSession(ctx context.Context, userID uuid.UUID, pendingRequestID uuid.UUID, priceID string, email string) (string, string, error) {
 	// Create checkout session parameters
 	params := &stripe.CheckoutSessionParams{
-		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-		SuccessURL: stripe.String(s.config.FrontendURL + "/servers/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
-		CancelURL:  stripe.String(s.config.FrontendURL + "/servers"),
+		Mode:          stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		SuccessURL:    stripe.String(s.config.FrontendURL + "/servers/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
+		CancelURL:     stripe.String(s.config.FrontendURL + "/servers"),
 		CustomerEmail: stripe.String(email),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
 			{
@@ -66,7 +66,15 @@ func (s *Service) RetrieveCheckoutSession(ctx context.Context, sessionID string)
 
 // VerifyWebhookSignature verifies and constructs a Stripe webhook event
 func (s *Service) VerifyWebhookSignature(body []byte, signature string) (*stripe.Event, error) {
-	event, err := webhook.ConstructEvent(body, signature, s.config.StripeWebhookSecret)
+	// TODO: Remove IgnoreAPIVersionMismatch once webhook is updated to 2025-11-17.clover
+	event, err := webhook.ConstructEventWithOptions(
+		body,
+		signature,
+		s.config.StripeWebhookSecret,
+		webhook.ConstructEventOptions{
+			IgnoreAPIVersionMismatch: true,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify webhook signature: %w", err)
 	}

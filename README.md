@@ -42,7 +42,7 @@ kubectl apply -f ./k8s/gshub/postgresql.yaml
 
 #### Setup Stripe products and webhook
 ```
-stripe listen --forward-to localhost:3000/webhook
+stripe listen --forward-to localhost:8080/api/v1/webhooks/stripe
 ```
 
 ### Get Mailersend API key

@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -13,6 +15,8 @@ import (
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	stripeservice "github.com/mooncorn/gshub/api/internal/services/stripe"
 	"github.com/stripe/stripe-go/v84"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type ServerHandler struct {
@@ -68,10 +72,12 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	// TODO: Consider reserving subdomains for pending requests as well
 	exists, err := h.db.SubdomainExists(c.Request.Context(), req.Subdomain)
 	if err != nil {
+		log.Printf("failed to check subdomain: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check subdomain"})
 		return
 	}
 	if exists {
+		log.Printf("subdomain already taken: %s", req.Subdomain)
 		c.JSON(http.StatusConflict, gin.H{"error": "subdomain already taken"})
 		return
 	}
@@ -79,6 +85,7 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	// Get price ID for game+plan combination
 	priceID, err := h.config.GetPriceID(string(req.Game), string(req.Plan))
 	if err != nil {
+		log.Printf("invalid game or plan: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -86,7 +93,11 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	// Create pending server request
 	displayName := &req.DisplayName
 	if req.DisplayName == "" {
-		displayName = nil
+		caser := cases.Title(language.English)
+		output := caser.String(strings.ToLower(req.Game))
+		defaultName := "My " + output + " Server"
+
+		displayName = &defaultName
 	}
 
 	pendingRequestID, err := h.db.CreatePendingServerRequest(
@@ -98,6 +109,7 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 		req.Plan,
 	)
 	if err != nil {
+		log.Printf("failed to create pending request: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create pending request"})
 		return
 	}
@@ -105,6 +117,7 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	// Get user email for Stripe
 	user, err := h.db.GetUserByID(c.Request.Context(), userID)
 	if err != nil {
+		log.Printf("failed to get user email: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user email"})
 		return
 	}
@@ -118,6 +131,7 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 		user.Email,
 	)
 	if err != nil {
+		log.Printf("failed to create checkout session: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create checkout session"})
 		return
 	}
@@ -125,6 +139,7 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	// Update pending request with session ID
 	err = h.db.UpdatePendingServerRequestWithSession(c.Request.Context(), *pendingRequestID, sessionID)
 	if err != nil {
+		log.Printf("failed to update pending request: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update pending request"})
 		return
 	}
@@ -173,12 +188,14 @@ func (h *ServerHandler) CheckoutSuccess(c *gin.Context) {
 func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 	body, err := c.GetRawData()
 	if err != nil {
+		log.Printf("failed to read request body: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 
 	signature := c.GetHeader("Stripe-Signature")
 	if signature == "" {
+		log.Printf("missing signature header")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing signature header"})
 		return
 	}
@@ -186,6 +203,7 @@ func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 	// Verify webhook signature
 	event, err := h.stripeService.VerifyWebhookSignature(body, signature)
 	if err != nil {
+		log.Printf("invalid webhook signature: %v", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return
 	}
@@ -195,12 +213,14 @@ func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 		// Unmarshal raw JSON data to get session ID
 		var sessionData map[string]interface{}
 		if err := json.Unmarshal(event.Data.Raw, &sessionData); err != nil {
+			log.Printf("failed to unmarshal webhook event data: %v", err)
 			c.JSON(http.StatusOK, gin.H{"status": "received"})
 			return
 		}
 
 		sessionID, ok := sessionData["id"].(string)
 		if !ok {
+			log.Printf("missing session ID in webhook event data")
 			c.JSON(http.StatusOK, gin.H{"status": "received"})
 			return
 		}
@@ -208,11 +228,13 @@ func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 		// Retrieve full session from Stripe
 		sess, err := h.stripeService.RetrieveCheckoutSession(c.Request.Context(), sessionID)
 		if err != nil {
+			log.Printf("failed to retrieve checkout session: %v", err)
 			c.JSON(http.StatusOK, gin.H{"status": "received"})
 			return
 		}
 
 		if err := h.stripeService.HandleCheckoutSessionCompleted(c.Request.Context(), sess); err != nil {
+			log.Printf("failed to handle checkout session completed: %v", err)
 			c.JSON(http.StatusOK, gin.H{"status": "received"})
 			return
 		}

@@ -26,7 +26,7 @@ func (db *DB) CreatePendingServerRequest(
 		RETURNING id
 	`
 
-	err := db.Pool.QueryRow(ctx, query, userID, displayName, subdomain, game, plan).Scan(&id)
+	err := db.Pool.QueryRow(ctx, query, userID, displayName, subdomain, game, plan, models.PendingStatusAwaitingPayment).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pending server request: %w", err)
 	}
