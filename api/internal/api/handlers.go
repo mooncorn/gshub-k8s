@@ -62,7 +62,6 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 
 		// Server checkout (protected)
 		protected.POST("/servers/checkout", h.ServerHandler.CreateCheckoutSession)
-		protected.GET("/servers/checkout/success", h.ServerHandler.CheckoutSuccess)
 	}
 
 	// Stripe webhook (public, signature verified)

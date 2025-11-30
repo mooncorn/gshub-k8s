@@ -14,7 +14,6 @@ import (
 	"github.com/mooncorn/gshub/api/internal/models"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	stripeservice "github.com/mooncorn/gshub/api/internal/services/stripe"
-	"github.com/stripe/stripe-go/v84"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -148,39 +147,6 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 		SessionID:        sessionID,
 		CheckoutURL:      checkoutURL,
 		PendingRequestID: pendingRequestID.String(),
-	})
-}
-
-// CheckoutSuccess confirms successful checkout
-func (h *ServerHandler) CheckoutSuccess(c *gin.Context) {
-	userIDStr := middleware.GetUserID(c)
-	if userIDStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-
-	sessionID := c.Query("session_id")
-	if sessionID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "session_id is required"})
-		return
-	}
-
-	// Retrieve checkout session from Stripe
-	sess, err := h.stripeService.RetrieveCheckoutSession(c.Request.Context(), sessionID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve session"})
-		return
-	}
-
-	// Verify payment status
-	if sess.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
-		c.JSON(http.StatusPaymentRequired, gin.H{"error": "payment not completed"})
-		return
-	}
-
-	c.JSON(http.StatusOK, CheckoutSuccessResponse{
-		Status:  "payment_confirmed",
-		Message: "Your server will be created shortly",
 	})
 }
 
