@@ -169,6 +169,7 @@ func (c *Client) CreateGameServer(
 			Ports: gameServerPorts, // Multiple ports
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
+					ServiceAccountName: "agones-sdk",
 					Containers: []corev1.Container{
 						{
 							Name:         "game",

@@ -40,6 +40,10 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list"]
 
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+
   # Permissions for managing Agones GameServers
   - apiGroups: ["agones.dev"]
     resources: ["gameservers"]
@@ -65,4 +69,45 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: gshub-api
+    namespace: gshub
+
+---
+# ServiceAccount: The "identity" for Agones SDK (used by GameServer pods)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agones-sdk
+  namespace: gshub
+  labels:
+    app: agones-sdk
+
+---
+# ClusterRole: Permissions for Agones SDK pods to access Kubernetes resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agones-sdk
+  labels:
+    app: agones-sdk
+rules:
+  # Allow pods to read and update their own GameServer status
+  - apiGroups: ["agones.dev"]
+    resources: ["gameservers"]
+    verbs: ["get", "list", "watch", "patch"]
+
+---
+# ClusterRoleBinding: Connect agones-sdk identity to its permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agones-sdk
+  labels:
+    app: agones-sdk
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agones-sdk
+subjects:
+  - kind: ServiceAccount
+    name: agones-sdk
     namespace: gshub

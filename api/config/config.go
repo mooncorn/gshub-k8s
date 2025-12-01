@@ -38,6 +38,10 @@ type Config struct {
 	StripePrices            map[string]map[string]string // game -> plan -> priceID
 
 	FrontendURL string
+
+	// Kubernetes
+	K8sNamespace       string
+	K8sGameCatalogName string
 }
 
 func Load() (*Config, error) {
@@ -88,6 +92,9 @@ func Load() (*Config, error) {
 		StripePrices:        stripePrices,
 
 		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:3000"),
+
+		K8sNamespace:       getEnv("K8S_NAMESPACE", "gshub"),
+		K8sGameCatalogName: getEnv("K8S_GAME_CATALOG_NAME", "game-catalog"),
 	}
 
 	// Validate required fields

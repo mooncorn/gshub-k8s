@@ -17,6 +17,9 @@ type Server struct {
 	Status               ServerStatus   `json:"status"`
 	StatusMessage        *string        `json:"status_message,omitempty"`
 	NodeIP               *string        `json:"node_ip,omitempty"`
+	PodIP                *string        `json:"pod_ip,omitempty"`
+	CreationError        *string        `json:"creation_error,omitempty"`
+	LastReconciled       *time.Time     `json:"last_reconciled,omitempty"`
 	Volumes              []ServerVolume `json:"volumes,omitempty"`
 	Ports                []ServerPort   `json:"ports,omitempty"`
 	StripeSubscriptionID *string        `json:"stripe_subscription_id,omitempty"`

@@ -13,6 +13,8 @@ import (
 	"github.com/mooncorn/gshub/api/internal/api"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/reconciler"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -55,6 +57,20 @@ func main() {
 	}
 
 	log.Println("Connected to Kubernetes API successfully")
+
+	// Initialize logger for reconciler
+	logger, err := zap.NewProduction()
+	if err != nil {
+		log.Fatal("Failed to create logger:", err)
+	}
+	defer logger.Sync()
+
+	// Initialize and start the server reconciler
+	serverReconciler := reconciler.NewServerReconciler(database, k8sClient, logger, cfg.K8sNamespace, cfg.K8sGameCatalogName)
+	serverReconciler.Start(ctx)
+	defer serverReconciler.Stop()
+
+	log.Println("Server reconciler started")
 
 	handlers := api.NewHandlers(database, cfg, k8sClient)
 	r := gin.Default()
