@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -150,61 +149,80 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	})
 }
 
-// HandleStripeWebhook handles Stripe webhook events
+// HandleStripeWebhook handles Stripe webhook events with proper error handling and deduplication
 func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
+	// Read raw request body
 	body, err := c.GetRawData()
 	if err != nil {
-		log.Printf("failed to read request body: %v", err)
+		log.Printf("webhook_error=read_body error=%v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 
+	// Verify webhook signature
 	signature := c.GetHeader("Stripe-Signature")
 	if signature == "" {
-		log.Printf("missing signature header")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing signature header"})
+		log.Printf("webhook_error=missing_signature")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing signature header"})
 		return
 	}
 
-	// Verify webhook signature
 	event, err := h.stripeService.VerifyWebhookSignature(body, signature)
 	if err != nil {
-		log.Printf("invalid webhook signature: %v", err)
+		log.Printf("webhook_error=invalid_signature event_id=%s error=%v", event.ID, err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return
 	}
 
-	// Handle checkout.session.completed event
-	if event.Type == "checkout.session.completed" {
-		// Unmarshal raw JSON data to get session ID
-		var sessionData map[string]interface{}
-		if err := json.Unmarshal(event.Data.Raw, &sessionData); err != nil {
-			log.Printf("failed to unmarshal webhook event data: %v", err)
-			c.JSON(http.StatusOK, gin.H{"status": "received"})
-			return
-		}
+	log.Printf("webhook_received event_id=%s event_type=%s", event.ID, event.Type)
 
-		sessionID, ok := sessionData["id"].(string)
-		if !ok {
-			log.Printf("missing session ID in webhook event data")
+	// Check if this event has already been processed (deduplication)
+	existingEvent, err := h.db.GetStripeWebhookEvent(c.Request.Context(), event.ID)
+	if err == nil && existingEvent != nil {
+		// Event was already processed
+		if existingEvent.Status == models.WebhookStatusCompleted {
+			log.Printf("webhook_duplicate event_id=%s (already processed successfully)", event.ID)
 			c.JSON(http.StatusOK, gin.H{"status": "received"})
 			return
 		}
-
-		// Retrieve full session from Stripe
-		sess, err := h.stripeService.RetrieveCheckoutSession(c.Request.Context(), sessionID)
-		if err != nil {
-			log.Printf("failed to retrieve checkout session: %v", err)
-			c.JSON(http.StatusOK, gin.H{"status": "received"})
-			return
-		}
-
-		if err := h.stripeService.HandleCheckoutSessionCompleted(c.Request.Context(), sess); err != nil {
-			log.Printf("failed to handle checkout session completed: %v", err)
-			c.JSON(http.StatusOK, gin.H{"status": "received"})
-			return
-		}
+		// Event was marked as failed, allow retry
+		log.Printf("webhook_retry event_id=%s (retrying after previous failure)", event.ID)
 	}
 
+	// Process the webhook event
+	err = h.stripeService.HandleStripeEvent(c.Request.Context(), event)
+	if err != nil {
+		// Record failure
+		errMsg := err.Error()
+		_, dbErr := h.db.CreateStripeWebhookEvent(
+			c.Request.Context(),
+			event.ID,
+			string(event.Type),
+			models.WebhookStatusFailed,
+			&errMsg,
+		)
+		if dbErr != nil {
+			log.Printf("webhook_error=record_failure event_id=%s error=%v", event.ID, dbErr)
+		}
+
+		log.Printf("webhook_error=processing_failed event_id=%s event_type=%s error=%v", event.ID, event.Type, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process webhook"})
+		return
+	}
+
+	// Record successful processing
+	_, err = h.db.CreateStripeWebhookEvent(
+		c.Request.Context(),
+		event.ID,
+		string(event.Type),
+		models.WebhookStatusCompleted,
+		nil,
+	)
+	if err != nil {
+		log.Printf("webhook_error=record_success event_id=%s error=%v", event.ID, err)
+		// Don't fail the response even if we can't record it
+	}
+
+	log.Printf("webhook_processed event_id=%s event_type=%s status=success", event.ID, event.Type)
 	c.JSON(http.StatusOK, gin.H{"status": "received"})
 }

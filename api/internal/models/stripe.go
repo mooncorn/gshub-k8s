@@ -31,3 +31,22 @@ const (
 	PendingStatusFailed          PaymentStatus = "failed"
 	PendingStatusExpired         PaymentStatus = "expired"
 )
+
+// StripeWebhookEvent represents a processed Stripe webhook event
+type StripeWebhookEvent struct {
+	ID             uuid.UUID      `json:"id"`
+	StripeEventID  string         `json:"stripe_event_id"`
+	EventType      string         `json:"event_type"`
+	Status         WebhookStatus  `json:"status"`
+	ErrorMessage   *string        `json:"error_message,omitempty"`
+	ProcessedAt    time.Time      `json:"processed_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
+type WebhookStatus string
+
+// StripeWebhookEvent status constants
+const (
+	WebhookStatusCompleted WebhookStatus = "completed"
+	WebhookStatusFailed    WebhookStatus = "failed"
+)

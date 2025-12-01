@@ -10,19 +10,20 @@ import (
 )
 
 type CreateServerParams struct {
-	UserID      uuid.UUID
-	DisplayName string
-	Subdomain   string
-	Game        models.GameType
-	Plan        models.ServerPlan
+	UserID               uuid.UUID
+	DisplayName          string
+	Subdomain            string
+	Game                 models.GameType
+	Plan                 models.ServerPlan
+	StripeSubscriptionID *string
 }
 
 // CreateServer inserts a new server with pending status and populates the server model
 func (db *DB) CreateServer(ctx context.Context, serverParams *CreateServerParams) (*models.Server, error) {
 	query := `
 		INSERT INTO servers (
-			user_id, display_name, subdomain, game, plan
-		) VALUES ($1, $2, $3, $4, $5)
+			user_id, display_name, subdomain, game, plan, stripe_subscription_id
+		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, user_id, display_name, subdomain, game, plan, status, status_message,
 		          node_ip, stripe_subscription_id,
 		          created_at, updated_at, stopped_at, expired_at, delete_after
@@ -35,6 +36,7 @@ func (db *DB) CreateServer(ctx context.Context, serverParams *CreateServerParams
 		serverParams.Subdomain,
 		serverParams.Game,
 		serverParams.Plan,
+		serverParams.StripeSubscriptionID,
 	).Scan(
 		&server.ID,
 		&server.UserID,
@@ -462,4 +464,105 @@ func (db *DB) GetServerVolumes(ctx context.Context, serverID string) ([]models.S
 	}
 
 	return volumes, nil
+}
+
+// GetServerByStripeSubscriptionID retrieves a server by its Stripe subscription ID
+func (db *DB) GetServerByStripeSubscriptionID(ctx context.Context, subscriptionID string) (*models.Server, error) {
+	query := `
+		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
+		       node_ip, stripe_subscription_id,
+		       created_at, updated_at, stopped_at, expired_at, delete_after
+		FROM servers
+		WHERE stripe_subscription_id = $1
+	`
+
+	var server models.Server
+	err := db.Pool.QueryRow(ctx, query, subscriptionID).Scan(
+		&server.ID,
+		&server.UserID,
+		&server.DisplayName,
+		&server.Subdomain,
+		&server.Game,
+		&server.Plan,
+		&server.Status,
+		&server.StatusMessage,
+		&server.NodeIP,
+		&server.StripeSubscriptionID,
+		&server.CreatedAt,
+		&server.UpdatedAt,
+		&server.StoppedAt,
+		&server.ExpiredAt,
+		&server.DeleteAfter,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get server by stripe subscription: %w", err)
+	}
+
+	return &server, nil
+}
+
+// MarkServerExpired marks a server as expired due to subscription end
+func (db *DB) MarkServerExpired(ctx context.Context, id string) error {
+	query := `
+		UPDATE servers
+		SET status = 'expired',
+		    expired_at = NOW(),
+		    delete_after = NOW() + interval '7 days',
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+
+	_, err := db.Pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to mark server expired: %w", err)
+	}
+
+	return nil
+}
+
+// GetExpiredServersForCleanup retrieves servers that are expired and past their delete_after time
+func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server, error) {
+	query := `
+		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
+		       node_ip, stripe_subscription_id,
+		       created_at, updated_at, stopped_at, expired_at, delete_after
+		FROM servers
+		WHERE delete_after <= NOW() AND status = 'expired'
+		ORDER BY delete_after ASC
+	`
+
+	rows, err := db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get expired servers for cleanup: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []models.Server
+	for rows.Next() {
+		var server models.Server
+		err := rows.Scan(
+			&server.ID,
+			&server.UserID,
+			&server.DisplayName,
+			&server.Subdomain,
+			&server.Game,
+			&server.Plan,
+			&server.Status,
+			&server.StatusMessage,
+			&server.NodeIP,
+			&server.StripeSubscriptionID,
+			&server.CreatedAt,
+			&server.UpdatedAt,
+			&server.StoppedAt,
+			&server.ExpiredAt,
+			&server.DeleteAfter,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		servers = append(servers, server)
+	}
+
+	return servers, nil
 }

@@ -106,20 +106,6 @@ CREATE TABLE IF NOT EXISTS server_volumes (
 
 CREATE INDEX IF NOT EXISTS idx_server_volumes_server_id ON server_volumes(server_id);
 
--- Subscriptions table - tracks Stripe subscriptions
-CREATE TABLE IF NOT EXISTS subscriptions (
-  id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  server_id               UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-  stripe_subscription_id  VARCHAR(255) UNIQUE,
-  status                  VARCHAR(20) DEFAULT 'active',
-  current_period_end      TIMESTAMP WITH TIME ZONE,
-  created_at              TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at              TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Index on stripe_subscription_id for webhook lookups
-CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_id ON subscriptions(stripe_subscription_id);
-
 -- Function to automatically update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -137,10 +123,5 @@ CREATE TRIGGER update_users_updated_at
 
 CREATE TRIGGER update_servers_updated_at
   BEFORE UPDATE ON servers
-  FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
-
-CREATE TRIGGER update_subscriptions_updated_at
-  BEFORE UPDATE ON subscriptions
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
