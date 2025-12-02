@@ -115,6 +115,7 @@ func (c *Client) CreateGameServer(
 	cpuRequest, memoryRequest string,
 	pvcName string,
 	labels map[string]string,
+	healthCheck *HealthCheckConfig,
 ) error {
 
 	// Build environment variables
@@ -159,6 +160,28 @@ func (c *Client) CreateGameServer(
 		},
 	}
 
+	// Build containers slice with game server and optional sidecar
+	containers := []corev1.Container{
+		{
+			Name:         "game",
+			Image:        image,
+			Env:          envVars,
+			VolumeMounts: volumeMounts, // Multiple mounts
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(cpuRequest),
+					corev1.ResourceMemory: resource.MustParse(memoryRequest),
+				},
+			},
+		},
+	}
+
+	// Add Agones SDK sidecar if health check is configured
+	if healthCheck != nil {
+		sidecarContainer := buildAgonesSidecarContainer(healthCheck)
+		containers = append(containers, sidecarContainer)
+	}
+
 	gs := &agonesv1.GameServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -166,25 +189,15 @@ func (c *Client) CreateGameServer(
 			Labels:    labels,
 		},
 		Spec: agonesv1.GameServerSpec{
-			Ports: gameServerPorts, // Multiple ports
+			Ports:     gameServerPorts,                 // Multiple ports
+			Container: "game",                          // Specify which container is the game server (required when using multiple containers)
+			Health:    agonesv1.Health{Disabled: true}, // Disable Agones' default health checks - our sidecar handles readiness
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "agones-sdk",
-					Containers: []corev1.Container{
-						{
-							Name:         "game",
-							Image:        image,
-							Env:          envVars,
-							VolumeMounts: volumeMounts, // Multiple mounts
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse(cpuRequest),
-									corev1.ResourceMemory: resource.MustParse(memoryRequest),
-								},
-							},
-						},
-					},
-					Volumes: podVolumes, // Single PVC
+					HostNetwork:        true, // Use host network so ports are directly accessible on the node
+					Containers:         containers,
+					Volumes:            podVolumes, // Single PVC
 				},
 			},
 		},
@@ -196,6 +209,42 @@ func (c *Client) CreateGameServer(
 	}
 
 	return nil
+}
+
+// buildAgonesSidecarContainer creates the Agones SDK sidecar container
+func buildAgonesSidecarContainer(healthCheck *HealthCheckConfig) corev1.Container {
+	return corev1.Container{
+		Name:  "agones-sidecar",
+		Image: "dasior/agones-sidecar:latest",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "HEALTH_CHECK_TYPE",
+				Value: healthCheck.Type,
+			},
+			{
+				Name:  "HEALTH_CHECK_PORT",
+				Value: healthCheck.Port,
+			},
+			{
+				Name:  "HEALTH_CHECK_PROTOCOL",
+				Value: healthCheck.Protocol,
+			},
+			{
+				Name:  "HEALTH_CHECK_INITIAL_DELAY",
+				Value: healthCheck.InitialDelay,
+			},
+			{
+				Name:  "HEALTH_CHECK_TIMEOUT",
+				Value: healthCheck.Timeout,
+			},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+		},
+	}
 }
 
 // GetGameServer retrieves a single GameServer

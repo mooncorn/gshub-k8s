@@ -15,12 +15,22 @@ type GameCatalog struct {
 
 // GameConfig holds configuration for a specific game
 type GameConfig struct {
-	Name    string                `yaml:"name"`
-	Image   string                `yaml:"image"`
-	Ports   []GamePort            `yaml:"ports"`
-	Volumes []GameVolume          `yaml:"volumes"`
-	Env     map[string]string     `yaml:"env"`
-	Plans   map[string]PlanConfig `yaml:"plans"`
+	Name        string                `yaml:"name"`
+	Image       string                `yaml:"image"`
+	Ports       []GamePort            `yaml:"ports"`
+	Volumes     []GameVolume          `yaml:"volumes"`
+	Env         map[string]string     `yaml:"env"`
+	HealthCheck *HealthCheckConfig    `yaml:"healthCheck"`
+	Plans       map[string]PlanConfig `yaml:"plans"`
+}
+
+// HealthCheckConfig holds configuration for sidecar health checks
+type HealthCheckConfig struct {
+	Type         string `yaml:"type"`         // "port", "delay", "log-pattern"
+	Port         string `yaml:"port"`         // Port number to check
+	Protocol     string `yaml:"protocol"`     // "TCP" or "UDP"
+	InitialDelay string `yaml:"initialDelay"` // Delay before starting checks (e.g., "10s" or "10" for seconds)
+	Timeout      string `yaml:"timeout"`      // Timeout for readiness (e.g., "30s" or "30" for seconds)
 }
 
 type GamePort struct {

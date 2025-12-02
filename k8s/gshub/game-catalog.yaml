@@ -9,17 +9,23 @@ data:
       minecraft:
         name: "Minecraft: Java Edition"
         image: "itzg/minecraft-server:latest"
-        ports: 
+        ports:
         - name: "game"
           port: 25565
           protocol: "TCP"
-        volumes: 
+        volumes:
         - name: "data"
           mount_path: "/data"
           sub_path: "data"
         env:
           EULA: "TRUE"
           TYPE: "PAPER"
+        healthCheck:
+          type: "port"
+          port: "25565"
+          protocol: "TCP"
+          initialDelay: "15"
+          timeout: "120"
         plans:
           small:
             name: "Small"
@@ -53,6 +59,12 @@ data:
           sub_path: "data"
         env:
           SERVER_PUBLIC: "false"
+        healthCheck:
+          type: "port"
+          port: "2456"
+          protocol: "UDP"
+          initialDelay: "20"
+          timeout: "120"
         plans:
           small:
             name: "Small"
