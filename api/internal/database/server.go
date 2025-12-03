@@ -482,6 +482,20 @@ func (db *DB) UpdateServerPortHost(ctx context.Context, serverID, portName strin
 	return err
 }
 
+// UpdateServerNodeIP updates the node IP where server is running
+func (db *DB) UpdateServerNodeIP(ctx context.Context, serverID, nodeIP string) error {
+	query := `
+        UPDATE servers
+        SET node_ip = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+    `
+	_, err := db.Pool.Exec(ctx, query, serverID, nodeIP)
+	if err != nil {
+		return fmt.Errorf("failed to update server node IP: %w", err)
+	}
+	return nil
+}
+
 // CreateServerVolume inserts a volume configuration
 func (db *DB) CreateServerVolume(ctx context.Context, vol *models.ServerVolume) error {
 	query := `

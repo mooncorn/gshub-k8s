@@ -1,4 +1,4 @@
-apiVersion: skaffold/v1beta15
+apiVersion: skaffold/v2beta28
 kind: Config
 metadata:
   name: gshub-api
@@ -13,11 +13,17 @@ build:
       manual:
       - src: "**/*.go"
         dest: /app
+  tagPolicy:
+    customTemplate:
+      template: "latest"
+  local:
+    push: false
+    useBuildkit: true
 
 deploy:
-  kubectl:
-    manifests:
-    - ../k8s/gshub/api.yaml
+  kustomize:
+    paths:
+    - ../k8s/overlays/dev
 
 portForward:
 - resourceType: service

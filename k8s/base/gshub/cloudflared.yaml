@@ -13,6 +13,15 @@ spec:
       labels:
         pod: cloudflared
     spec:
+      # Optional: Only schedules to control-plane nodes if they exist
+      # In k3d development, this is ignored if nodes aren't labeled
+      nodeSelector:
+        workload-type: control-plane
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
       securityContext:
         sysctls:
         - name: net.ipv4.ping_group_range

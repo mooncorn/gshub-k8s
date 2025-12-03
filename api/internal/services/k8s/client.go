@@ -196,8 +196,55 @@ func (c *Client) CreateGameServer(
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "agones-sdk",
 					HostNetwork:        true, // Use host network so ports are directly accessible on the node
-					Containers:         containers,
-					Volumes:            podVolumes, // Single PVC
+					// Node affinity: Schedule on nodes with game-compute OR control-plane workload
+					// This allows GameServers to run in both k3d (control-plane) and k3s production (game-compute)
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												// Accept nodes with workload-type=game-compute (k3s agents)
+												// OR workload-type=control-plane (k3d development)
+												Key:      "workload-type",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"game-compute", "control-plane"},
+											},
+											{
+												// Must also have gameserver role
+												Key:      "node-role.kubernetes.io/gameserver",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"true"},
+											},
+										},
+									},
+								},
+							},
+						},
+						// Spread GameServers across nodes for better distribution
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+								{
+									Weight: 100,
+									PodAffinityTerm: corev1.PodAffinityTerm{
+										LabelSelector: &metav1.LabelSelector{
+											MatchExpressions: []metav1.LabelSelectorRequirement{
+												{
+													Key:      "agones.dev/role",
+													Operator: metav1.LabelSelectorOpIn,
+													Values:   []string{"gameserver"},
+												},
+											},
+										},
+										TopologyKey: "kubernetes.io/hostname",
+									},
+								},
+							},
+						},
+					},
+					Containers: containers,
+					Volumes:    podVolumes, // Single PVC
 				},
 			},
 		},

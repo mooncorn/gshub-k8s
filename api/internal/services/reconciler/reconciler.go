@@ -194,28 +194,87 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// Extract pod IP from GameServer status
-	if gs.Status.Address == "" {
-		r.logger.Warn("pod ready but no address assigned",
+	// Extract node name where GameServer is scheduled
+	if gs.Status.NodeName == "" {
+		r.logger.Warn("pod ready but no node assigned",
 			zap.String("server_id", serverID))
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// Update server status to running with pod IP
-	if err := r.db.UpdateServerToRunning(ctx, serverID, gs.Status.Address); err != nil {
-		r.logger.Error("failed to update server status", zap.String("server_id", serverID), zap.Error(err))
+	// Get node to retrieve public IP from label
+	node, err := r.k8sClient.GetNode(ctx, gs.Status.NodeName)
+	if err != nil {
+		r.logger.Error("failed to get node",
+			zap.String("server_id", serverID),
+			zap.String("node_name", gs.Status.NodeName),
+			zap.Error(err))
+		return r.db.UpdateServerLastReconciled(ctx, serverID)
+	}
+
+	// Extract public IP from node label, fallback to pod IP if not found (for k3d development)
+	nodePublicIP, ok := node.Labels["platform.io/public-ip"]
+	if !ok || nodePublicIP == "" {
+		// Development fallback: use pod IP if no public IP label
+		r.logger.Warn("node missing public IP label, using pod IP",
+			zap.String("server_id", serverID),
+			zap.String("node_name", gs.Status.NodeName))
+
+		if gs.Status.Address == "" {
+			r.logger.Error("no public IP label and no pod address",
+				zap.String("server_id", serverID))
+			return r.db.UpdateServerLastReconciled(ctx, serverID)
+		}
+
+		nodePublicIP = gs.Status.Address // Use pod IP in development
+	}
+
+	// Extract allocated ports from GameServer status
+	if len(gs.Status.Ports) == 0 {
+		r.logger.Warn("pod ready but no ports allocated",
+			zap.String("server_id", serverID))
+		return r.db.UpdateServerLastReconciled(ctx, serverID)
+	}
+
+	// Update server status to running with node public IP
+	if err := r.db.UpdateServerToRunning(ctx, serverID, nodePublicIP); err != nil {
+		r.logger.Error("failed to update server status",
+			zap.String("server_id", serverID), zap.Error(err))
 		return err
 	}
 
-	// Also update the pod IP field specifically
-	if err := r.db.UpdateServerPodIP(ctx, serverID, gs.Status.Address); err != nil {
-		r.logger.Error("failed to update pod IP", zap.String("server_id", serverID), zap.Error(err))
+	// Update node IP field
+	if err := r.db.UpdateServerNodeIP(ctx, serverID, nodePublicIP); err != nil {
+		r.logger.Error("failed to update node IP",
+			zap.String("server_id", serverID), zap.Error(err))
 		return err
+	}
+
+	// Update pod IP (internal K8s IP) if available
+	if gs.Status.Address != "" {
+		if err := r.db.UpdateServerPodIP(ctx, serverID, gs.Status.Address); err != nil {
+			r.logger.Error("failed to update pod IP",
+				zap.String("server_id", serverID), zap.Error(err))
+			// Non-fatal, continue
+		}
+	}
+
+	// Update allocated ports in database
+	for _, port := range gs.Status.Ports {
+		if err := r.db.UpdateServerPortHost(ctx, serverID, port.Name, int(port.Port)); err != nil {
+			r.logger.Error("failed to update port allocation",
+				zap.String("server_id", serverID),
+				zap.String("port_name", port.Name),
+				zap.Int32("host_port", port.Port),
+				zap.Error(err))
+			// Non-fatal, continue with other ports
+		}
 	}
 
 	r.logger.Info("server reconciled successfully",
 		zap.String("server_id", serverID),
-		zap.String("pod_address", gs.Status.Address))
+		zap.String("node_ip", nodePublicIP),
+		zap.String("pod_address", gs.Status.Address),
+		zap.Int("port_count", len(gs.Status.Ports)))
 
 	return nil
 }

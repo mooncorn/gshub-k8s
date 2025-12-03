@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - gshub/rbac.yaml
+  - gshub/game-catalog.yaml
+  - gshub/postgresql.yaml
+  - gshub/cloudflared.yaml
+  - gshub/api.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/part-of: gshub
+
+namespace: gshub
