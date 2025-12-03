@@ -169,7 +169,7 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 	}
 
 	err = r.k8sClient.CreateGameServer(ctx, r.k8sNamespace, gsName, gameConfig.Image, ports, volumes,
-		gameConfig.Env, planConfig.CPU, planConfig.Memory, pvcName, labels)
+		gameConfig.Env, planConfig.CPU, planConfig.Memory, pvcName, labels, gameConfig.HealthCheck)
 	if err != nil && !isAlreadyExistsError(err) {
 		r.logger.Error("failed to create GameServer", zap.String("server_id", serverID), zap.Error(err))
 		// Log but don't fail yet - might be transient

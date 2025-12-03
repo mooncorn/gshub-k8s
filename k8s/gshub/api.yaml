@@ -29,7 +29,7 @@ spec:
       serviceAccountName: gshub-api
       containers:
       - name: api
-        image: gshub-api
+        image: dasior/gshub-api:latest
         ports:
         - containerPort: 8080
         env:
