@@ -195,7 +195,16 @@ func (c *Client) CreateGameServer(
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "agones-sdk",
-					HostNetwork:        true, // Use host network so ports are directly accessible on the node
+					// Fix DNS resolution for external hostnames like "fill.papermc.io"
+					// Default ndots:5 causes short hostnames to append cluster search domains first
+					DNSConfig: &corev1.PodDNSConfig{
+						Options: []corev1.PodDNSConfigOption{
+							{
+								Name:  "ndots",
+								Value: func() *string { s := "2"; return &s }(),
+							},
+						},
+					},
 					// Node affinity: Schedule on nodes with game-compute OR control-plane workload
 					// This allows GameServers to run in both k3d (control-plane) and k3s production (game-compute)
 					Affinity: &corev1.Affinity{
@@ -261,8 +270,9 @@ func (c *Client) CreateGameServer(
 // buildAgonesSidecarContainer creates the Agones SDK sidecar container
 func buildAgonesSidecarContainer(healthCheck *HealthCheckConfig) corev1.Container {
 	return corev1.Container{
-		Name:  "agones-sidecar",
-		Image: "dasior/agones-sidecar:latest",
+		Name:            "agones-sidecar",
+		Image:           "dasior/port-health-check:v1.0.0",
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		Env: []corev1.EnvVar{
 			{
 				Name:  "HEALTH_CHECK_TYPE",
