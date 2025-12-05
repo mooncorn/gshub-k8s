@@ -169,7 +169,7 @@ func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 
 	event, err := h.stripeService.VerifyWebhookSignature(body, signature)
 	if err != nil {
-		log.Printf("webhook_error=invalid_signature event_id=%s error=%v", event.ID, err)
+		log.Printf("webhook_error=invalid_signature error=%v", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return
 	}

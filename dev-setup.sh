@@ -9,7 +9,7 @@ set -o pipefail # Exit on pipe failures
 
 # Script configuration
 CLUSTER_NAME="gshub"
-K3D_PORT_RANGE="7000-7050"
+K3D_PORT_RANGE="25501-25999"
 REQUIRED_TOOLS=("k3d" "helm" "skaffold" "kubectl")
 
 # Logging functions

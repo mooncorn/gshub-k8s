@@ -15,11 +15,11 @@ helm repo update
 helm upgrade --install agones agones/agones \
     --namespace agones-system \
     --create-namespace \
-    --set agones.controller.portRanges[0].minPort=7000 \
-    --set agones.controller.portRanges[0].maxPort=8000 \
+    --set agones.controller.portRanges[0].minPort=25501 \
+    --set agones.controller.portRanges[0].maxPort=25999 \
     --set agones.controller.portRanges[0].protocol=TCP \
-    --set agones.controller.portRanges[1].minPort=7000 \
-    --set agones.controller.portRanges[1].maxPort=8000 \
+    --set agones.controller.portRanges[1].minPort=25501 \
+    --set agones.controller.portRanges[1].maxPort=25999 \
     --set agones.controller.portRanges[1].protocol=UDP \
     --set agones.controller.tolerations[0].key="node-role.kubernetes.io/master" \
     --set agones.controller.tolerations[0].operator=Equal \
@@ -43,6 +43,6 @@ helm upgrade --install agones agones/agones \
 
 echo ""
 echo "Agones installed successfully!"
-echo "Port range: 7000-8000 (TCP/UDP)"
+echo "Port range: 25501-25999 (TCP/UDP)"
 echo "Watching namespace: gshub"
 echo "Controller scheduled on: master nodes only"

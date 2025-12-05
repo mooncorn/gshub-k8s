@@ -78,11 +78,11 @@ Perfect for local development and testing on a single machine.
 
 ```bash
 # Create cluster with port range exposed for game servers
-k3d cluster create gshub-dev \
+k3d cluster create gshub \
   --api-port 6443 \
   --servers 1 \
   --agents 0 \
-  --port "7000-7050:7000-7050@server:0" \
+  --port "25501-25999:25501-25999@server:0" \
   --k3s-arg "--disable=traefik@server:0" \
   --k3s-arg "--disable=servicelb@server:0"
 
@@ -439,6 +439,10 @@ sudo ufw allow 7000:8000/udp
 # Allow k3s communication from master
 sudo ufw allow from <master-ip> to any port 6443
 
+## Add required exception for CNI traffic
+sudo ufw allow in on cni0
+sudo ufw allow in on flannel.1
+
 # Enable firewall
 sudo ufw --force enable
 
@@ -530,6 +534,34 @@ NAME                READY   STATUS    RESTARTS   AGE   NODE
 api-xxx             1/1     Running   0          2m    master-node
 postgresql-0        1/1     Running   0          3m    master-node
 cloudflared-xxx     1/1     Running   0          1m    master-node
+```
+
+
+
+## Step 12: Add DNS timout/retry settings
+**Edit `/etc/systemd/resolved.conf`** on all nodes:
+```
+sudo nano /etc/systemd/resolved.conf
+```
+**Add/modify**:
+```
+[Resolve]
+DNS=8.8.8.8 8.8.4.4 192.168.2.1
+FallbackDNS=1.1.1.1
+DNSStubListener=yes
+Cache=yes
+CacheFromLocalhost=no
+```
+
+## Step 13: Use Cloudflare + Google DNS in CoreDNS
+**Run this patch:**
+```
+kubectl -n kube-system patch configmap coredns --type merge -p \
+'{"data":{"Corefile":".:53 {\n    errors\n    health\n    ready\n    kubernetes cluster.local in-addr.arpa ip6.arpa {\n       pods insecure\n       fallthrough in-addr.arpa ip6.arpa\n    }\n    hosts /etc/coredns/NodeHosts {\n      ttl 60\n      reload 15s\n      fallthrough\n    }\n    prometheus :9153\n    cache 30\n    loop\n    reload\n    loadbalance\n    import /etc/coredns/custom/*.override\n    forward . 1.1.1.1 8.8.8.8\n}\nimport /etc/coredns/custom/*.server"}}'
+```
+**Then restart CoreDNS:**
+```
+kubectl -n kube-system rollout restart deployment coredns
 ```
 
 ---

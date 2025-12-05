@@ -11,6 +11,7 @@ import (
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +19,7 @@ import (
 type ServerReconciler struct {
 	db                 *database.DB
 	k8sClient          *k8s.Client
+	portAllocService   *portalloc.Service
 	logger             *zap.Logger
 	done               chan struct{}
 	ticker             *time.Ticker
@@ -27,10 +29,11 @@ type ServerReconciler struct {
 }
 
 // NewServerReconciler creates a new reconciler
-func NewServerReconciler(db *database.DB, k8sClient *k8s.Client, logger *zap.Logger, k8sNamespace, k8sGameCatalogName string) *ServerReconciler {
+func NewServerReconciler(db *database.DB, k8sClient *k8s.Client, portAllocService *portalloc.Service, logger *zap.Logger, k8sNamespace, k8sGameCatalogName string) *ServerReconciler {
 	return &ServerReconciler{
 		db:                 db,
 		k8sClient:          k8sClient,
+		portAllocService:   portAllocService,
 		logger:             logger,
 		done:               make(chan struct{}),
 		reconcileTicket:    15 * time.Second, // Run every 15 seconds
@@ -134,28 +137,68 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.MarkServerFailed(ctx, serverID, errMsg)
 	}
 
-	// Create PVC if it doesn't exist
+	// STEP 1: Allocate ports (if not already allocated)
+	allocations, err := r.portAllocService.GetServerPorts(ctx, server.ID)
+	if err != nil {
+		r.logger.Error("failed to check port allocations", zap.String("server_id", serverID), zap.Error(err))
+		return r.db.UpdateServerLastReconciled(ctx, serverID)
+	}
+
+	if len(allocations) == 0 {
+		// Need to allocate ports - build requirements from game config
+		portReqs := make([]portalloc.PortRequirement, len(gameConfig.Ports))
+		for i, p := range gameConfig.Ports {
+			portReqs[i] = portalloc.PortRequirement{
+				Name:     p.Name,
+				Protocol: p.Protocol,
+			}
+		}
+
+		allocations, err = r.portAllocService.AllocatePorts(ctx, server.ID, portReqs)
+		if err != nil {
+			errMsg := fmt.Sprintf("no port capacity available: %v", err)
+			r.logger.Warn("marking server as failed - no port capacity", zap.String("server_id", serverID))
+			return r.db.MarkServerFailed(ctx, serverID, errMsg)
+		}
+
+		r.logger.Info("allocated ports for server",
+			zap.String("server_id", serverID),
+			zap.String("node", allocations[0].NodeName),
+			zap.Int("port_count", len(allocations)))
+	}
+
+	// STEP 2: Create PVC if it doesn't exist
 	pvcName := fmt.Sprintf("server-%s", serverID)
 	labels := map[string]string{"server": serverID, "game": string(server.Game)}
 
 	err = r.k8sClient.CreatePVC(ctx, r.k8sNamespace, pvcName, planConfig.Storage, labels)
 	if err != nil && !isAlreadyExistsError(err) {
 		r.logger.Error("failed to create PVC", zap.String("server_id", serverID), zap.Error(err))
-		// Log but don't fail yet - might be transient
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// Create GameServer
+	// STEP 3: Create GameServer with static ports pinned to the allocated node
 	gsName := fmt.Sprintf("server-%s", serverID)
+	nodeName := allocations[0].NodeName
+	nodeIP := allocations[0].NodeIP
 
-	// Convert port configs
-	var ports []k8s.PortConfig
-	for _, port := range gameConfig.Ports {
-		ports = append(ports, k8s.PortConfig{
-			Name:          port.Name,
-			ContainerPort: port.Port,
-			Protocol:      corev1.Protocol(port.Protocol),
-		})
+	// Build static port configs from allocations
+	staticPorts := make([]k8s.StaticPortConfig, len(allocations))
+	for i, alloc := range allocations {
+		// Find the container port from game config
+		var containerPort int32
+		for _, p := range gameConfig.Ports {
+			if p.Name == alloc.PortName {
+				containerPort = p.Port
+				break
+			}
+		}
+		staticPorts[i] = k8s.StaticPortConfig{
+			Name:          alloc.PortName,
+			ContainerPort: containerPort,
+			HostPort:      int32(alloc.Port),
+			Protocol:      corev1.Protocol(alloc.Protocol),
+		}
 	}
 
 	// Convert volume configs
@@ -168,15 +211,15 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		})
 	}
 
-	err = r.k8sClient.CreateGameServer(ctx, r.k8sNamespace, gsName, gameConfig.Image, ports, volumes,
-		gameConfig.Env, planConfig.CPU, planConfig.Memory, pvcName, labels, gameConfig.HealthCheck)
+	err = r.k8sClient.CreateGameServerWithStaticPorts(ctx, r.k8sNamespace, gsName, gameConfig.Image,
+		nodeName, staticPorts, volumes, gameConfig.Env, planConfig.CPU, planConfig.Memory,
+		pvcName, labels, gameConfig.HealthCheck)
 	if err != nil && !isAlreadyExistsError(err) {
 		r.logger.Error("failed to create GameServer", zap.String("server_id", serverID), zap.Error(err))
-		// Log but don't fail yet - might be transient
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// Check if GameServer is ready
+	// STEP 4: Check if GameServer is ready
 	gs, err := r.k8sClient.GetGameServer(ctx, r.k8sNamespace, gsName)
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -184,7 +227,6 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		} else {
 			r.logger.Error("failed to get GameServer", zap.String("server_id", serverID), zap.Error(err))
 		}
-		// Not ready yet, update timestamp and continue
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
@@ -194,56 +236,15 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// Extract node name where GameServer is scheduled
-	if gs.Status.NodeName == "" {
-		r.logger.Warn("pod ready but no node assigned",
-			zap.String("server_id", serverID))
-		return r.db.UpdateServerLastReconciled(ctx, serverID)
-	}
-
-	// Get node to retrieve public IP from label
-	node, err := r.k8sClient.GetNode(ctx, gs.Status.NodeName)
-	if err != nil {
-		r.logger.Error("failed to get node",
-			zap.String("server_id", serverID),
-			zap.String("node_name", gs.Status.NodeName),
-			zap.Error(err))
-		return r.db.UpdateServerLastReconciled(ctx, serverID)
-	}
-
-	// Extract public IP from node label, fallback to pod IP if not found (for k3d development)
-	nodePublicIP, ok := node.Labels["platform.io/public-ip"]
-	if !ok || nodePublicIP == "" {
-		// Development fallback: use pod IP if no public IP label
-		r.logger.Warn("node missing public IP label, using pod IP",
-			zap.String("server_id", serverID),
-			zap.String("node_name", gs.Status.NodeName))
-
-		if gs.Status.Address == "" {
-			r.logger.Error("no public IP label and no pod address",
-				zap.String("server_id", serverID))
-			return r.db.UpdateServerLastReconciled(ctx, serverID)
-		}
-
-		nodePublicIP = gs.Status.Address // Use pod IP in development
-	}
-
-	// Extract allocated ports from GameServer status
-	if len(gs.Status.Ports) == 0 {
-		r.logger.Warn("pod ready but no ports allocated",
-			zap.String("server_id", serverID))
-		return r.db.UpdateServerLastReconciled(ctx, serverID)
-	}
-
-	// Update server status to running with node public IP
-	if err := r.db.UpdateServerToRunning(ctx, serverID, nodePublicIP); err != nil {
+	// STEP 5: Update server status to running (ports already known from allocation)
+	if err := r.db.UpdateServerToRunning(ctx, serverID, nodeIP); err != nil {
 		r.logger.Error("failed to update server status",
 			zap.String("server_id", serverID), zap.Error(err))
 		return err
 	}
 
 	// Update node IP field
-	if err := r.db.UpdateServerNodeIP(ctx, serverID, nodePublicIP); err != nil {
+	if err := r.db.UpdateServerNodeIP(ctx, serverID, nodeIP); err != nil {
 		r.logger.Error("failed to update node IP",
 			zap.String("server_id", serverID), zap.Error(err))
 		return err
@@ -258,23 +259,23 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		}
 	}
 
-	// Update allocated ports in database
-	for _, port := range gs.Status.Ports {
-		if err := r.db.UpdateServerPortHost(ctx, serverID, port.Name, int(port.Port)); err != nil {
+	// Update allocated ports in server_ports table (for backwards compatibility)
+	for _, alloc := range allocations {
+		if err := r.db.UpdateServerPortHost(ctx, serverID, alloc.PortName, alloc.Port); err != nil {
 			r.logger.Error("failed to update port allocation",
 				zap.String("server_id", serverID),
-				zap.String("port_name", port.Name),
-				zap.Int32("host_port", port.Port),
+				zap.String("port_name", alloc.PortName),
+				zap.Int("host_port", alloc.Port),
 				zap.Error(err))
-			// Non-fatal, continue with other ports
 		}
 	}
 
 	r.logger.Info("server reconciled successfully",
 		zap.String("server_id", serverID),
-		zap.String("node_ip", nodePublicIP),
+		zap.String("node", nodeName),
+		zap.String("node_ip", nodeIP),
 		zap.String("pod_address", gs.Status.Address),
-		zap.Int("port_count", len(gs.Status.Ports)))
+		zap.Int("port_count", len(allocations)))
 
 	return nil
 }

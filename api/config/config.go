@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,6 +43,10 @@ type Config struct {
 	// Kubernetes
 	K8sNamespace       string
 	K8sGameCatalogName string
+
+	// Port Allocation
+	PortRangeMin int
+	PortRangeMax int
 }
 
 func Load() (*Config, error) {
@@ -95,6 +100,9 @@ func Load() (*Config, error) {
 
 		K8sNamespace:       getEnv("K8S_NAMESPACE", "gshub"),
 		K8sGameCatalogName: getEnv("K8S_GAME_CATALOG_NAME", "game-catalog"),
+
+		PortRangeMin: getEnvInt("PORT_RANGE_MIN", 25501),
+		PortRangeMax: getEnvInt("PORT_RANGE_MAX", 25999),
 	}
 
 	// Validate required fields
@@ -118,6 +126,15 @@ func getEnv(key, defaultValue string) string {
 func getEnvSlice(key string, defaultValue []string) []string {
 	if value := os.Getenv(key); value != "" {
 		return strings.Split(value, ",")
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
 	}
 	return defaultValue
 }

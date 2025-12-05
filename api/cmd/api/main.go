@@ -13,6 +13,8 @@ import (
 	"github.com/mooncorn/gshub/api/internal/api"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/nodesync"
+	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/mooncorn/gshub/api/internal/services/reconciler"
 	"go.uber.org/zap"
 )
@@ -58,15 +60,32 @@ func main() {
 
 	log.Println("Connected to Kubernetes API successfully")
 
-	// Initialize logger for reconciler
+	// Initialize logger for services
 	logger, err := zap.NewProduction()
 	if err != nil {
 		log.Fatal("Failed to create logger:", err)
 	}
 	defer logger.Sync()
 
+	// Initialize port allocation service
+	portAllocService := portalloc.NewService(database, logger)
+	log.Println("Port allocation service initialized")
+
+	// Initialize and start node sync service
+	nodeSyncConfig := nodesync.Config{
+		PortRangeMin:  cfg.PortRangeMin,
+		PortRangeMax:  cfg.PortRangeMax,
+		SyncInterval:  nodesync.DefaultConfig().SyncInterval,
+		NodeRoleLabel: nodesync.DefaultConfig().NodeRoleLabel,
+		PublicIPLabel: nodesync.DefaultConfig().PublicIPLabel,
+	}
+	nodeSyncService := nodesync.NewService(database, k8sClient, nodeSyncConfig, logger)
+	nodeSyncService.Start(ctx)
+	defer nodeSyncService.Stop()
+	log.Println("Node sync service started")
+
 	// Initialize and start the server reconciler
-	serverReconciler := reconciler.NewServerReconciler(database, k8sClient, logger, cfg.K8sNamespace, cfg.K8sGameCatalogName)
+	serverReconciler := reconciler.NewServerReconciler(database, k8sClient, portAllocService, logger, cfg.K8sNamespace, cfg.K8sGameCatalogName)
 	serverReconciler.Start(ctx)
 	defer serverReconciler.Stop()
 

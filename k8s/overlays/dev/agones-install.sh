@@ -14,11 +14,11 @@ helm repo update
 helm upgrade --install agones agones/agones \
   --namespace agones-system \
   --create-namespace \
-  --set agones.controller.portRanges[0].minPort=7000 \
-  --set agones.controller.portRanges[0].maxPort=7050 \
+  --set agones.controller.portRanges[0].minPort=25501 \
+  --set agones.controller.portRanges[0].maxPort=25999 \
   --set agones.controller.portRanges[0].protocol=TCP \
-  --set agones.controller.portRanges[1].minPort=7000 \
-  --set agones.controller.portRanges[1].maxPort=7050 \
+  --set agones.controller.portRanges[1].minPort=25501 \
+  --set agones.controller.portRanges[1].maxPort=25999 \
   --set agones.controller.portRanges[1].protocol=UDP \
   --set gameservers.namespaces[0]=gshub \
   --wait \
@@ -26,7 +26,7 @@ helm upgrade --install agones agones/agones \
 
 echo ""
 echo "Agones installed successfully!"
-echo "Port range: 7000-7050 (TCP/UDP)"
+echo "Port range: 25501-25999 (TCP/UDP)"
 echo "Watching namespace: gshub"
 echo ""
 echo "Note: No node selector configured (suitable for single-node k3d)"

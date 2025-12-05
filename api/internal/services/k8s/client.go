@@ -16,10 +16,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// PortConfig defines a port for GameServer
+// PortConfig defines a port for GameServer (dynamic allocation)
 type PortConfig struct {
 	Name          string
 	ContainerPort int32
+	Protocol      corev1.Protocol
+}
+
+// StaticPortConfig defines a port for GameServer with a pre-allocated host port
+type StaticPortConfig struct {
+	Name          string
+	ContainerPort int32
+	HostPort      int32 // Pre-allocated host port
 	Protocol      corev1.Protocol
 }
 
@@ -262,6 +270,141 @@ func (c *Client) CreateGameServer(
 	_, err := c.agonesClientset.AgonesV1().GameServers(namespace).Create(ctx, gs, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create GameServer: %w", err)
+	}
+
+	return nil
+}
+
+// CreateGameServerWithStaticPorts creates an Agones GameServer with pre-allocated static ports
+// pinned to a specific node using hard node affinity
+func (c *Client) CreateGameServerWithStaticPorts(
+	ctx context.Context,
+	namespace, name, image string,
+	nodeName string, // Target node name for hard affinity
+	ports []StaticPortConfig, // Pre-allocated ports with HostPort
+	volumes []VolumeConfig,
+	env map[string]string,
+	cpuRequest, memoryRequest string,
+	pvcName string,
+	labels map[string]string,
+	healthCheck *HealthCheckConfig,
+) error {
+
+	// Build environment variables
+	var envVars []corev1.EnvVar
+	for key, value := range env {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  key,
+			Value: value,
+		})
+	}
+
+	// Build Agones ports with STATIC policy and pre-allocated host ports
+	var gameServerPorts []agonesv1.GameServerPort
+	for _, port := range ports {
+		gameServerPorts = append(gameServerPorts, agonesv1.GameServerPort{
+			Name:          port.Name,
+			PortPolicy:    agonesv1.Static, // Static port policy
+			ContainerPort: port.ContainerPort,
+			HostPort:      port.HostPort, // Pre-allocated host port
+			Protocol:      port.Protocol,
+		})
+	}
+
+	// Build volume mounts from multiple volumes (all using same PVC)
+	var volumeMounts []corev1.VolumeMount
+	for _, vol := range volumes {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "server-data",
+			MountPath: vol.MountPath,
+			SubPath:   vol.SubPath,
+		})
+	}
+
+	// Single PVC volume
+	podVolumes := []corev1.Volume{
+		{
+			Name: "server-data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			},
+		},
+	}
+
+	// Build containers slice with game server and optional sidecar
+	containers := []corev1.Container{
+		{
+			Name:         "game",
+			Image:        image,
+			Env:          envVars,
+			VolumeMounts: volumeMounts,
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(cpuRequest),
+					corev1.ResourceMemory: resource.MustParse(memoryRequest),
+				},
+			},
+		},
+	}
+
+	// Add Agones SDK sidecar if health check is configured
+	if healthCheck != nil {
+		sidecarContainer := buildAgonesSidecarContainer(healthCheck)
+		containers = append(containers, sidecarContainer)
+	}
+
+	gs := &agonesv1.GameServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: agonesv1.GameServerSpec{
+			Ports:     gameServerPorts,
+			Container: "game",
+			Health:    agonesv1.Health{Disabled: true},
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "agones-sdk",
+					DNSConfig: &corev1.PodDNSConfig{
+						Options: []corev1.PodDNSConfigOption{
+							{
+								Name:  "ndots",
+								Value: func() *string { s := "2"; return &s }(),
+							},
+						},
+					},
+					// Hard node affinity: Pin to the specific node where port is allocated
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												// Pin to specific node by hostname
+												Key:      "kubernetes.io/hostname",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{nodeName},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Containers: containers,
+					Volumes:    podVolumes,
+				},
+			},
+		},
+	}
+
+	_, err := c.agonesClientset.AgonesV1().GameServers(namespace).Create(ctx, gs, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create GameServer with static ports: %w", err)
 	}
 
 	return nil
