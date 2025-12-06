@@ -259,17 +259,6 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		}
 	}
 
-	// Update allocated ports in server_ports table (for backwards compatibility)
-	for _, alloc := range allocations {
-		if err := r.db.UpdateServerPortHost(ctx, serverID, alloc.PortName, alloc.Port); err != nil {
-			r.logger.Error("failed to update port allocation",
-				zap.String("server_id", serverID),
-				zap.String("port_name", alloc.PortName),
-				zap.Int("host_port", alloc.Port),
-				zap.Error(err))
-		}
-	}
-
 	r.logger.Info("server reconciled successfully",
 		zap.String("server_id", serverID),
 		zap.String("node", nodeName),

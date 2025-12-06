@@ -113,16 +113,16 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 			s.created_at, s.updated_at, s.stopped_at, s.expired_at, s.delete_after,
 			COALESCE(
 				(SELECT json_agg(json_build_object(
-					'id', p.id,
-					'server_id', p.server_id,
-					'name', p.name,
-					'container_port', p.container_port,
-					'host_port', p.host_port,
-					'protocol', p.protocol,
-					'created_at', p.created_at
-				) ORDER BY p.name)
-				FROM server_ports p
-				WHERE p.server_id = s.id),
+					'id', pa.id,
+					'server_id', pa.server_id,
+					'name', pa.port_name,
+					'container_port', 0,
+					'host_port', pa.port,
+					'protocol', pa.protocol,
+					'created_at', pa.created_at
+				) ORDER BY pa.port_name)
+				FROM port_allocations pa
+				WHERE pa.server_id = s.id),
 				'[]'::json
 			) as ports,
 			COALESCE(
@@ -421,65 +421,6 @@ func (db *DB) HardDeleteServer(ctx context.Context, id string) error {
 	}
 
 	return nil
-}
-
-// CreateServerPort inserts a port configuration
-func (db *DB) CreateServerPort(ctx context.Context, port *models.ServerPort) error {
-	query := `
-        INSERT INTO server_ports (server_id, name, container_port, protocol)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, created_at
-    `
-	return db.Pool.QueryRow(ctx, query,
-		port.ServerID, port.Name, port.ContainerPort, port.Protocol,
-	).Scan(&port.ID, &port.CreatedAt)
-}
-
-// GetServerPorts retrieves all ports for a server
-func (db *DB) GetServerPorts(ctx context.Context, serverID string) ([]models.ServerPort, error) {
-	query := `
-        SELECT id, server_id, name, container_port, host_port, protocol, created_at
-        FROM server_ports
-        WHERE server_id = $1
-        ORDER BY name
-    `
-
-	rows, err := db.Pool.Query(ctx, query, serverID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get server ports: %w", err)
-	}
-	defer rows.Close()
-
-	var ports []models.ServerPort
-	for rows.Next() {
-		var port models.ServerPort
-		err := rows.Scan(
-			&port.ID,
-			&port.ServerID,
-			&port.Name,
-			&port.ContainerPort,
-			&port.HostPort,
-			&port.Protocol,
-			&port.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan server port: %w", err)
-		}
-		ports = append(ports, port)
-	}
-
-	return ports, nil
-}
-
-// UpdateServerPortHost updates the allocated host port
-func (db *DB) UpdateServerPortHost(ctx context.Context, serverID, portName string, hostPort int) error {
-	query := `
-        UPDATE server_ports
-        SET host_port = $3
-        WHERE server_id = $1 AND name = $2
-    `
-	_, err := db.Pool.Exec(ctx, query, serverID, portName, hostPort)
-	return err
 }
 
 // UpdateServerNodeIP updates the node IP where server is running

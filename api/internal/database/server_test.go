@@ -126,25 +126,6 @@ func Test_GetServerByIDWithDetails(t *testing.T) {
 	})
 	require.NoError(t, err, "CreateServer should not return an error")
 
-	// Add ports
-	gamePort := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "game",
-		ContainerPort: 25565,
-		Protocol:      "TCP",
-	}
-	err = db.CreateServerPort(ctx, gamePort)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
-	queryPort := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "query",
-		ContainerPort: 25575,
-		Protocol:      "UDP",
-	}
-	err = db.CreateServerPort(ctx, queryPort)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
 	// Add volumes
 	dataVolume := &models.ServerVolume{
 		ServerID:  server.ID.String(),
@@ -177,17 +158,9 @@ func Test_GetServerByIDWithDetails(t *testing.T) {
 	assert.Equal(t, models.PlanSmall, serverWithDetails.Plan, "Plan should match")
 	assert.Equal(t, models.ServerStatusPending, serverWithDetails.Status, "Status should match")
 
-	// Verify ports
-	require.Len(t, serverWithDetails.Ports, 2, "Should have 2 ports")
-
-	// Ports are ordered by name, so "game" comes before "query"
-	assert.Equal(t, "game", serverWithDetails.Ports[0].Name, "First port should be 'game'")
-	assert.Equal(t, 25565, serverWithDetails.Ports[0].ContainerPort, "Game port should be 25565")
-	assert.Equal(t, "TCP", serverWithDetails.Ports[0].Protocol, "Game port protocol should be TCP")
-
-	assert.Equal(t, "query", serverWithDetails.Ports[1].Name, "Second port should be 'query'")
-	assert.Equal(t, 25575, serverWithDetails.Ports[1].ContainerPort, "Query port should be 25575")
-	assert.Equal(t, "UDP", serverWithDetails.Ports[1].Protocol, "Query port protocol should be UDP")
+	// Verify ports (no port allocations created, so should be empty)
+	// Ports are now managed via port_allocations table, tested separately
+	require.Len(t, serverWithDetails.Ports, 0, "Should have 0 ports without port allocations")
 
 	// Verify volumes
 	require.Len(t, serverWithDetails.Volumes, 2, "Should have 2 volumes")
@@ -655,148 +628,6 @@ func Test_HardDeleteServer(t *testing.T) {
 	// Verify server no longer exists
 	_, err = db.GetServerByID(ctx, server.ID.String())
 	assert.Error(t, err, "GetServerByID should return an error for deleted server")
-}
-
-func Test_CreateServerPort(t *testing.T) {
-	db, cleanup := setupTest(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Create user and server
-	user, err := db.CreateUser(ctx, RandomEmail(), "password_hash")
-	require.NoError(t, err, "CreateUser should not return an error")
-
-	server, err := db.CreateServer(ctx, &CreateServerParams{
-		UserID:      user.ID,
-		DisplayName: "Test Server",
-		Subdomain:   RandomSubdomain(),
-		Game:        models.GameMinecraft,
-		Plan:        models.PlanSmall,
-	})
-	require.NoError(t, err, "CreateServer should not return an error")
-
-	// Create server port
-	port := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "game",
-		ContainerPort: 25565,
-		Protocol:      "TCP",
-	}
-
-	err = db.CreateServerPort(ctx, port)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
-	// Verify port fields were populated
-	assert.NotZero(t, port.ID, "Port ID should be set")
-	assert.NotZero(t, port.CreatedAt, "Port CreatedAt should be set")
-	assert.Equal(t, server.ID.String(), port.ServerID, "ServerID should match")
-	assert.Equal(t, "game", port.Name, "Name should match")
-	assert.Equal(t, 25565, port.ContainerPort, "ContainerPort should match")
-	assert.Equal(t, "TCP", port.Protocol, "Protocol should match")
-	assert.Nil(t, port.HostPort, "HostPort should be nil initially")
-}
-
-func Test_GetServerPorts(t *testing.T) {
-	db, cleanup := setupTest(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Create user and server
-	user, err := db.CreateUser(ctx, RandomEmail(), "password_hash")
-	require.NoError(t, err, "CreateUser should not return an error")
-
-	server, err := db.CreateServer(ctx, &CreateServerParams{
-		UserID:      user.ID,
-		DisplayName: "Test Server",
-		Subdomain:   RandomSubdomain(),
-		Game:        models.GameMinecraft,
-		Plan:        models.PlanSmall,
-	})
-	require.NoError(t, err, "CreateServer should not return an error")
-
-	// Create multiple ports
-	gamePort := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "game",
-		ContainerPort: 25565,
-		Protocol:      "TCP",
-	}
-	err = db.CreateServerPort(ctx, gamePort)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
-	queryPort := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "query",
-		ContainerPort: 25575,
-		Protocol:      "UDP",
-	}
-	err = db.CreateServerPort(ctx, queryPort)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
-	// Get all ports for server
-	ports, err := db.GetServerPorts(ctx, server.ID.String())
-	require.NoError(t, err, "GetServerPorts should not return an error")
-
-	// Verify correct number of ports
-	require.Len(t, ports, 2, "Should have 2 ports")
-
-	// Ports are ordered by name, so "game" comes before "query"
-	assert.Equal(t, "game", ports[0].Name, "First port should be 'game'")
-	assert.Equal(t, 25565, ports[0].ContainerPort, "Game port should be 25565")
-	assert.Equal(t, "TCP", ports[0].Protocol, "Game port protocol should be TCP")
-
-	assert.Equal(t, "query", ports[1].Name, "Second port should be 'query'")
-	assert.Equal(t, 25575, ports[1].ContainerPort, "Query port should be 25575")
-	assert.Equal(t, "UDP", ports[1].Protocol, "Query port protocol should be UDP")
-}
-
-func Test_UpdateServerPortHost(t *testing.T) {
-	db, cleanup := setupTest(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Create user and server
-	user, err := db.CreateUser(ctx, RandomEmail(), "password_hash")
-	require.NoError(t, err, "CreateUser should not return an error")
-
-	server, err := db.CreateServer(ctx, &CreateServerParams{
-		UserID:      user.ID,
-		DisplayName: "Test Server",
-		Subdomain:   RandomSubdomain(),
-		Game:        models.GameMinecraft,
-		Plan:        models.PlanSmall,
-	})
-	require.NoError(t, err, "CreateServer should not return an error")
-
-	// Create port
-	port := &models.ServerPort{
-		ServerID:      server.ID.String(),
-		Name:          "game",
-		ContainerPort: 25565,
-		Protocol:      "TCP",
-	}
-	err = db.CreateServerPort(ctx, port)
-	require.NoError(t, err, "CreateServerPort should not return an error")
-
-	// Verify host_port is nil initially
-	assert.Nil(t, port.HostPort, "HostPort should be nil initially")
-
-	// Update host port
-	hostPort := 30123
-	err = db.UpdateServerPortHost(ctx, server.ID.String(), "game", hostPort)
-	require.NoError(t, err, "UpdateServerPortHost should not return an error")
-
-	// Retrieve updated ports
-	ports, err := db.GetServerPorts(ctx, server.ID.String())
-	require.NoError(t, err, "GetServerPorts should not return an error")
-	require.Len(t, ports, 1, "Should have 1 port")
-
-	// Verify host_port was updated
-	assert.NotNil(t, ports[0].HostPort, "HostPort should be set")
-	assert.Equal(t, hostPort, *ports[0].HostPort, "HostPort should match")
 }
 
 func Test_CreateServerVolume(t *testing.T) {

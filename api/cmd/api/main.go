@@ -44,8 +44,13 @@ func main() {
 
 	log.Println("Connected to database successfully")
 
-	// Initialize Kubernetes client
+	// Run database migrations
 	ctx := context.Background()
+	if err := database.Migrate(ctx, cfg.MigrationsDir); err != nil {
+		log.Fatal("Failed to run migrations:", err)
+	}
+
+	// Initialize Kubernetes client
 	k8sClient, err := k8s.NewClient()
 	if err != nil {
 		log.Fatal("Failed to initialize K8s client:", err)

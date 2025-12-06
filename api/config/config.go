@@ -47,6 +47,9 @@ type Config struct {
 	// Port Allocation
 	PortRangeMin int
 	PortRangeMax int
+
+	// Migrations
+	MigrationsDir string
 }
 
 func Load() (*Config, error) {
@@ -103,6 +106,8 @@ func Load() (*Config, error) {
 
 		PortRangeMin: getEnvInt("PORT_RANGE_MIN", 25501),
 		PortRangeMax: getEnvInt("PORT_RANGE_MAX", 25999),
+
+		MigrationsDir: getEnv("MIGRATIONS_DIR", "migrations"),
 	}
 
 	// Validate required fields

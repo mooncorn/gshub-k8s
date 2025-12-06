@@ -99,10 +99,12 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	// Collect and sort migration files (they're already sorted by name due to numbering)
+	// Only include files that match the migration naming pattern (00001_xxx.sql)
 	var migrationFiles []string
 	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".sql" {
-			migrationFiles = append(migrationFiles, entry.Name())
+		name := entry.Name()
+		if !entry.IsDir() && filepath.Ext(name) == ".sql" && len(name) >= 5 && name[0:5] >= "00001" && name[0:5] <= "99999" {
+			migrationFiles = append(migrationFiles, name)
 		}
 	}
 
