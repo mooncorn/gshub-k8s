@@ -12,6 +12,7 @@ import (
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/api"
 	"github.com/mooncorn/gshub/api/internal/database"
+	"github.com/mooncorn/gshub/api/internal/services/cleanup"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"github.com/mooncorn/gshub/api/internal/services/nodesync"
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
@@ -96,7 +97,18 @@ func main() {
 
 	log.Println("Server reconciler started")
 
-	handlers := api.NewHandlers(database, cfg, k8sClient)
+	// Initialize and start the cleanup service
+	cleanupConfig := cleanup.Config{
+		Interval:  cleanup.DefaultConfig().Interval,
+		Namespace: cfg.K8sNamespace,
+	}
+	cleanupService := cleanup.NewService(database, k8sClient, cleanupConfig, logger)
+	cleanupService.Start(ctx)
+	defer cleanupService.Stop()
+
+	log.Println("Cleanup service started")
+
+	handlers := api.NewHandlers(database, cfg, k8sClient, portAllocService)
 	r := gin.Default()
 	handlers.RegisterRoutes(r)
 

@@ -7,6 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
@@ -154,17 +155,29 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 			}
 		}
 
-		allocations, err = r.portAllocService.AllocatePorts(ctx, server.ID, portReqs)
+		// Build resource requirements from plan config
+		// Add sidecar overhead: 100m CPU + 128Mi memory
+		cpuMillicores := parseCPUToMillicores(planConfig.CPU) + 100
+		memBytes := parseMemoryToBytes(planConfig.Memory) + 128*1024*1024
+
+		resourceReq := &portalloc.ResourceRequirement{
+			CPUMillicores: cpuMillicores,
+			MemoryBytes:   memBytes,
+		}
+
+		allocations, err = r.portAllocService.AllocatePorts(ctx, server.ID, portReqs, resourceReq)
 		if err != nil {
-			errMsg := fmt.Sprintf("no port capacity available: %v", err)
-			r.logger.Warn("marking server as failed - no port capacity", zap.String("server_id", serverID))
+			errMsg := fmt.Sprintf("no capacity available: %v", err)
+			r.logger.Warn("marking server as failed - no capacity", zap.String("server_id", serverID))
 			return r.db.MarkServerFailed(ctx, serverID, errMsg)
 		}
 
-		r.logger.Info("allocated ports for server",
+		r.logger.Info("allocated ports and resources for server",
 			zap.String("server_id", serverID),
 			zap.String("node", allocations[0].NodeName),
-			zap.Int("port_count", len(allocations)))
+			zap.Int("port_count", len(allocations)),
+			zap.Int("cpu_millicores", cpuMillicores),
+			zap.Int64("memory_bytes", memBytes))
 	}
 
 	// STEP 2: Create PVC if it doesn't exist
@@ -272,4 +285,16 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 // isAlreadyExistsError checks if an error is due to a resource already existing
 func isAlreadyExistsError(err error) bool {
 	return errors.IsAlreadyExists(err)
+}
+
+// parseCPUToMillicores converts a CPU string (e.g., "1", "500m", "2") to millicores
+func parseCPUToMillicores(cpu string) int {
+	q := resource.MustParse(cpu)
+	return int(q.MilliValue())
+}
+
+// parseMemoryToBytes converts a memory string (e.g., "2Gi", "512Mi") to bytes
+func parseMemoryToBytes(memory string) int64 {
+	q := resource.MustParse(memory)
+	return q.Value()
 }

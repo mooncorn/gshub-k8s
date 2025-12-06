@@ -11,12 +11,14 @@ import (
 
 // Node represents a Kubernetes node available for game server scheduling
 type Node struct {
-	ID        uuid.UUID
-	Name      string
-	PublicIP  string
-	IsActive  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID                       uuid.UUID
+	Name                     string
+	PublicIP                 string
+	IsActive                 bool
+	AllocatableCPUMillicores *int   // K8s allocatable CPU in millicores (1000 = 1 core)
+	AllocatableMemoryBytes   *int64 // K8s allocatable memory in bytes
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // PortAllocation represents a port slot on a node
@@ -46,18 +48,27 @@ type PortRequirement struct {
 	Protocol string // "TCP" or "UDP"
 }
 
+// ResourceRequirement specifies CPU/memory needed for a game server
+type ResourceRequirement struct {
+	CPUMillicores int   // CPU in millicores (1000 = 1 core)
+	MemoryBytes   int64 // Memory in bytes
+}
+
 // UpsertNode creates or updates a node record
 func (db *DB) UpsertNode(ctx context.Context, node *Node) error {
 	query := `
-		INSERT INTO nodes (name, public_ip, is_active)
-		VALUES ($1, $2, $3)
+		INSERT INTO nodes (name, public_ip, is_active, allocatable_cpu_millicores, allocatable_memory_bytes)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (name) DO UPDATE SET
 			public_ip = EXCLUDED.public_ip,
 			is_active = EXCLUDED.is_active,
+			allocatable_cpu_millicores = EXCLUDED.allocatable_cpu_millicores,
+			allocatable_memory_bytes = EXCLUDED.allocatable_memory_bytes,
 			updated_at = NOW()
 		RETURNING id, created_at, updated_at
 	`
-	err := db.Pool.QueryRow(ctx, query, node.Name, node.PublicIP, node.IsActive).
+	err := db.Pool.QueryRow(ctx, query, node.Name, node.PublicIP, node.IsActive,
+		node.AllocatableCPUMillicores, node.AllocatableMemoryBytes).
 		Scan(&node.ID, &node.CreatedAt, &node.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to upsert node: %w", err)
@@ -68,13 +79,14 @@ func (db *DB) UpsertNode(ctx context.Context, node *Node) error {
 // GetNodeByName retrieves a node by its Kubernetes name
 func (db *DB) GetNodeByName(ctx context.Context, name string) (*Node, error) {
 	query := `
-		SELECT id, name, public_ip, is_active, created_at, updated_at
+		SELECT id, name, public_ip, is_active, allocatable_cpu_millicores, allocatable_memory_bytes, created_at, updated_at
 		FROM nodes
 		WHERE name = $1
 	`
 	var node Node
 	err := db.Pool.QueryRow(ctx, query, name).Scan(
 		&node.ID, &node.Name, &node.PublicIP, &node.IsActive,
+		&node.AllocatableCPUMillicores, &node.AllocatableMemoryBytes,
 		&node.CreatedAt, &node.UpdatedAt,
 	)
 	if err != nil {
@@ -86,7 +98,7 @@ func (db *DB) GetNodeByName(ctx context.Context, name string) (*Node, error) {
 // GetAllNodes retrieves all nodes
 func (db *DB) GetAllNodes(ctx context.Context) ([]Node, error) {
 	query := `
-		SELECT id, name, public_ip, is_active, created_at, updated_at
+		SELECT id, name, public_ip, is_active, allocatable_cpu_millicores, allocatable_memory_bytes, created_at, updated_at
 		FROM nodes
 		ORDER BY name
 	`
@@ -101,6 +113,7 @@ func (db *DB) GetAllNodes(ctx context.Context) ([]Node, error) {
 		var node Node
 		if err := rows.Scan(
 			&node.ID, &node.Name, &node.PublicIP, &node.IsActive,
+			&node.AllocatableCPUMillicores, &node.AllocatableMemoryBytes,
 			&node.CreatedAt, &node.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %w", err)
@@ -138,10 +151,11 @@ func (db *DB) InitializeNodePorts(ctx context.Context, nodeID uuid.UUID, minPort
 	return nil
 }
 
-// AllocatePortsForServer allocates ports for a server on an available node
+// AllocatePortsForServer allocates ports and reserves resources for a server on an available node
 // Uses SELECT FOR UPDATE to prevent race conditions
 // Returns the node and allocated ports
-func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, requirements []PortRequirement) (*Node, []AllocatedPort, error) {
+// If resourceReq is nil, resource checking is skipped (for backward compatibility)
+func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, requirements []PortRequirement, resourceReq *ResourceRequirement) (*Node, []AllocatedPort, error) {
 	tx, err := db.Pool.Begin(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -159,30 +173,78 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 		}
 	}
 
-	// Find a node with enough available ports for both protocols
+	// Find a node with enough available ports and resources
 	// Lock the node row to prevent concurrent allocations
-	nodeQuery := `
-		SELECT n.id, n.name, n.public_ip
-		FROM nodes n
-		WHERE n.is_active = TRUE
-		AND (
-			SELECT COUNT(*) FROM port_allocations pa
-			WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'TCP'
-		) >= $1
-		AND (
-			SELECT COUNT(*) FROM port_allocations pa
-			WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'UDP'
-		) >= $2
-		ORDER BY (
-			SELECT COUNT(*) FROM port_allocations pa
-			WHERE pa.node_id = n.id AND pa.server_id IS NULL
-		) DESC
-		LIMIT 1
-		FOR UPDATE OF n
-	`
-
+	var nodeQuery string
 	var node Node
-	err = tx.QueryRow(ctx, nodeQuery, tcpCount, udpCount).Scan(&node.ID, &node.Name, &node.PublicIP)
+
+	if resourceReq != nil {
+		// Query with resource checking - only considers nodes with resource data
+		nodeQuery = `
+			SELECT n.id, n.name, n.public_ip
+			FROM nodes n
+			WHERE n.is_active = TRUE
+			AND n.allocatable_cpu_millicores IS NOT NULL
+			AND n.allocatable_memory_bytes IS NOT NULL
+			-- Port availability
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'TCP'
+			) >= $1
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'UDP'
+			) >= $2
+			-- Resource availability (capacity - sum of active reservations)
+			AND (
+				n.allocatable_cpu_millicores - COALESCE(
+					(SELECT SUM(s.reserved_cpu_millicores) FROM servers s
+					 WHERE s.node_name = n.name
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_cpu_millicores IS NOT NULL), 0
+				)
+			) >= $3
+			AND (
+				n.allocatable_memory_bytes - COALESCE(
+					(SELECT SUM(s.reserved_memory_bytes) FROM servers s
+					 WHERE s.node_name = n.name
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_memory_bytes IS NOT NULL), 0
+				)
+			) >= $4
+			ORDER BY (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL
+			) DESC
+			LIMIT 1
+			FOR UPDATE OF n
+		`
+		err = tx.QueryRow(ctx, nodeQuery, tcpCount, udpCount, resourceReq.CPUMillicores, resourceReq.MemoryBytes).
+			Scan(&node.ID, &node.Name, &node.PublicIP)
+	} else {
+		// Query without resource checking (backward compatibility)
+		nodeQuery = `
+			SELECT n.id, n.name, n.public_ip
+			FROM nodes n
+			WHERE n.is_active = TRUE
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'TCP'
+			) >= $1
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'UDP'
+			) >= $2
+			ORDER BY (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL
+			) DESC
+			LIMIT 1
+			FOR UPDATE OF n
+		`
+		err = tx.QueryRow(ctx, nodeQuery, tcpCount, udpCount).Scan(&node.ID, &node.Name, &node.PublicIP)
+	}
+
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil, fmt.Errorf("no node with available capacity")
@@ -230,11 +292,21 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 		})
 	}
 
-	// Update server's node_name
-	serverUpdateQuery := `UPDATE servers SET node_name = $1 WHERE id = $2`
-	_, err = tx.Exec(ctx, serverUpdateQuery, node.Name, serverID)
+	// Update server's node_name and resource reservations
+	var serverUpdateQuery string
+	if resourceReq != nil {
+		serverUpdateQuery = `
+			UPDATE servers
+			SET node_name = $1, reserved_cpu_millicores = $2, reserved_memory_bytes = $3
+			WHERE id = $4
+		`
+		_, err = tx.Exec(ctx, serverUpdateQuery, node.Name, resourceReq.CPUMillicores, resourceReq.MemoryBytes, serverID)
+	} else {
+		serverUpdateQuery = `UPDATE servers SET node_name = $1 WHERE id = $2`
+		_, err = tx.Exec(ctx, serverUpdateQuery, node.Name, serverID)
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to update server node_name: %w", err)
+		return nil, nil, fmt.Errorf("failed to update server: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

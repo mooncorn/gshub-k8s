@@ -11,14 +11,19 @@ import (
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
+	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/stripe/stripe-go/v84"
 	"github.com/stripe/stripe-go/v84/checkout/session"
 	"github.com/stripe/stripe-go/v84/webhook"
 )
 
 type Service struct {
-	db     *database.DB
-	config *config.Config
+	db               *database.DB
+	config           *config.Config
+	k8sClient        *k8s.Client
+	portAllocService *portalloc.Service
+	k8sNamespace     string
 }
 
 // WebhookError represents an error that occurred during webhook processing
@@ -53,11 +58,14 @@ var (
 	ErrMissingEventData  = NewWebhookError(http.StatusBadRequest, "missing or invalid event data", nil)
 )
 
-func NewService(db *database.DB, cfg *config.Config) *Service {
+func NewService(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, portAllocService *portalloc.Service, k8sNamespace string) *Service {
 	stripe.Key = cfg.StripeSecretKey
 	return &Service{
-		db:     db,
-		config: cfg,
+		db:               db,
+		config:           cfg,
+		k8sClient:        k8sClient,
+		portAllocService: portAllocService,
+		k8sNamespace:     k8sNamespace,
 	}
 }
 
@@ -183,8 +191,28 @@ func (s *Service) handleSubscriptionDeleted(ctx context.Context, event *stripe.E
 		return nil // Don't fail webhook if server not found; it may have been created before we stored subscription IDs
 	}
 
-	// Mark server as expired and set 7-day deletion grace period
-	err = s.db.MarkServerExpired(ctx, server.ID.String())
+	serverID := server.ID.String()
+
+	// 1. Delete GameServer from K8s (if running)
+	gsName := "server-" + serverID
+	if err := s.k8sClient.DeleteGameServer(ctx, s.k8sNamespace, gsName); err != nil {
+		log.Printf("Failed to delete GameServer (may not exist): event_id=%s server_id=%s error=%v", event.ID, serverID, err)
+		// Continue - GameServer may not exist if server was already stopped
+	} else {
+		log.Printf("Deleted GameServer: event_id=%s server_id=%s", event.ID, serverID)
+	}
+
+	// 2. Release port allocations
+	if err := s.portAllocService.ReleasePorts(ctx, server.ID); err != nil {
+		log.Printf("Failed to release ports: event_id=%s server_id=%s error=%v", event.ID, serverID, err)
+		// Continue - ports may not be allocated
+	} else {
+		log.Printf("Released ports: event_id=%s server_id=%s", event.ID, serverID)
+	}
+
+	// 3. Mark server as expired (clears node_name and resource reservations, sets 7-day grace period)
+	// PVC is NOT deleted here - it remains for the 7-day grace period
+	err = s.db.MarkServerExpired(ctx, serverID)
 	if err != nil {
 		return fmt.Errorf("failed to mark server expired: event_id=%s server_id=%s subscription_id=%s error=%w", event.ID, server.ID, sub.ID, err)
 	}

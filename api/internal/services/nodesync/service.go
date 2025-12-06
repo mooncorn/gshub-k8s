@@ -129,11 +129,25 @@ func (s *Service) SyncNodes(ctx context.Context) error {
 		// Check if node is ready
 		isReady := isNodeReady(&node)
 
+		// Extract allocatable resources from K8s node
+		var cpuMillicores *int
+		var memoryBytes *int64
+		if cpuQuantity, ok := node.Status.Allocatable[corev1.ResourceCPU]; ok {
+			val := int(cpuQuantity.MilliValue())
+			cpuMillicores = &val
+		}
+		if memQuantity, ok := node.Status.Allocatable[corev1.ResourceMemory]; ok {
+			val := memQuantity.Value()
+			memoryBytes = &val
+		}
+
 		// Upsert node in database
 		dbNode := &database.Node{
-			Name:     node.Name,
-			PublicIP: publicIP,
-			IsActive: isReady,
+			Name:                     node.Name,
+			PublicIP:                 publicIP,
+			IsActive:                 isReady,
+			AllocatableCPUMillicores: cpuMillicores,
+			AllocatableMemoryBytes:   memoryBytes,
 		}
 
 		if err := s.db.UpsertNode(ctx, dbNode); err != nil {
@@ -157,6 +171,8 @@ func (s *Service) SyncNodes(ctx context.Context) error {
 			zap.String("node", node.Name),
 			zap.String("public_ip", publicIP),
 			zap.Bool("is_active", isReady),
+			zap.Intp("cpu_millicores", cpuMillicores),
+			zap.Int64p("memory_bytes", memoryBytes),
 		)
 	}
 

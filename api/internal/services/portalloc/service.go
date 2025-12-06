@@ -29,6 +29,12 @@ type PortRequirement struct {
 	Protocol string // "TCP" or "UDP"
 }
 
+// ResourceRequirement specifies CPU/memory needed for a game server
+type ResourceRequirement struct {
+	CPUMillicores int   // CPU in millicores (1000 = 1 core)
+	MemoryBytes   int64 // Memory in bytes
+}
+
 // AllocatedPort contains node info with the allocated port
 type AllocatedPort struct {
 	NodeName string
@@ -38,9 +44,10 @@ type AllocatedPort struct {
 	PortName string
 }
 
-// AllocatePorts allocates ports for a server on an available node
+// AllocatePorts allocates ports and resources for a server on an available node
 // Returns allocated ports or error if no capacity
-func (s *Service) AllocatePorts(ctx context.Context, serverID uuid.UUID, requirements []PortRequirement) ([]AllocatedPort, error) {
+// If resourceReq is nil, resource checking is skipped (for backward compatibility)
+func (s *Service) AllocatePorts(ctx context.Context, serverID uuid.UUID, requirements []PortRequirement, resourceReq *ResourceRequirement) ([]AllocatedPort, error) {
 	// Convert to database requirements
 	dbReqs := make([]database.PortRequirement, len(requirements))
 	for i, req := range requirements {
@@ -50,7 +57,16 @@ func (s *Service) AllocatePorts(ctx context.Context, serverID uuid.UUID, require
 		}
 	}
 
-	node, dbPorts, err := s.db.AllocatePortsForServer(ctx, serverID, dbReqs)
+	// Convert resource requirement if provided
+	var dbResourceReq *database.ResourceRequirement
+	if resourceReq != nil {
+		dbResourceReq = &database.ResourceRequirement{
+			CPUMillicores: resourceReq.CPUMillicores,
+			MemoryBytes:   resourceReq.MemoryBytes,
+		}
+	}
+
+	node, dbPorts, err := s.db.AllocatePortsForServer(ctx, serverID, dbReqs, dbResourceReq)
 	if err != nil {
 		s.logger.Error("failed to allocate ports",
 			zap.String("server_id", serverID.String()),

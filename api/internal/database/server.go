@@ -521,12 +521,17 @@ func (db *DB) GetServerByStripeSubscriptionID(ctx context.Context, subscriptionI
 }
 
 // MarkServerExpired marks a server as expired due to subscription end
+// Clears node_name and resource reservations since ports are released separately
+// PVC remains for the 7-day grace period
 func (db *DB) MarkServerExpired(ctx context.Context, id string) error {
 	query := `
 		UPDATE servers
 		SET status = 'expired',
 		    expired_at = NOW(),
 		    delete_after = NOW() + interval '7 days',
+		    node_name = NULL,
+		    reserved_cpu_millicores = NULL,
+		    reserved_memory_bytes = NULL,
 		    updated_at = NOW()
 		WHERE id = $1
 	`

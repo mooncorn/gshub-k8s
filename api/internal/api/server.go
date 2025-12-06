@@ -149,6 +149,199 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 	})
 }
 
+// ListServers returns all servers belonging to the current user
+func (h *ServerHandler) ListServers(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	servers, err := h.db.ListServersByUser(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("failed to list servers: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list servers"})
+		return
+	}
+
+	if servers == nil {
+		servers = []models.Server{}
+	}
+
+	c.JSON(http.StatusOK, models.ServerListResponse{
+		Servers: servers,
+		Total:   len(servers),
+	})
+}
+
+// GetServer returns server details including K8s status for a specific server
+func (h *ServerHandler) GetServer(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	// Get server with details from database
+	server, err := h.db.GetServerByIDWithDetails(c.Request.Context(), serverID)
+	if err != nil {
+		log.Printf("failed to get server: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Verify server belongs to user
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Try to get K8s GameServer status if server is running
+	var k8sState *string
+	if server.Status == models.ServerStatusRunning || server.Status == models.ServerStatusPending {
+		gsName := "server-" + serverID
+		gs, err := h.k8sClient.GetGameServer(c.Request.Context(), h.config.K8sNamespace, gsName)
+		if err == nil && gs != nil {
+			state := string(gs.Status.State)
+			k8sState = &state
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"server":    server,
+		"k8s_state": k8sState,
+	})
+}
+
+// StopServer stops a running game server by deleting it from K8s
+func (h *ServerHandler) StopServer(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	// Get server from database
+	server, err := h.db.GetServerByID(c.Request.Context(), serverID)
+	if err != nil {
+		log.Printf("failed to get server: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Verify server belongs to user
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Check if server can be stopped
+	if server.Status != models.ServerStatusRunning && server.Status != models.ServerStatusPending {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server is not running"})
+		return
+	}
+
+	// Delete GameServer from K8s
+	gsName := "server-" + serverID
+	err = h.k8sClient.DeleteGameServer(c.Request.Context(), h.config.K8sNamespace, gsName)
+	if err != nil {
+		log.Printf("failed to delete GameServer: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to stop server"})
+		return
+	}
+
+	// Mark server as stopped in database
+	err = h.db.MarkServerStopped(c.Request.Context(), serverID)
+	if err != nil {
+		log.Printf("failed to mark server stopped: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update server status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "stopped", "message": "server stopped successfully"})
+}
+
+// StartServer starts a stopped game server by setting status to pending
+func (h *ServerHandler) StartServer(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	// Get server from database
+	server, err := h.db.GetServerByID(c.Request.Context(), serverID)
+	if err != nil {
+		log.Printf("failed to get server: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Verify server belongs to user
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Check if server can be started
+	if server.Status != models.ServerStatusStopped && server.Status != models.ServerStatusFailed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server cannot be started from current state"})
+		return
+	}
+
+	// Set status to pending so reconciler will pick it up
+	err = h.db.UpdateServerStatus(c.Request.Context(), serverID, string(models.ServerStatusPending), "")
+	if err != nil {
+		log.Printf("failed to update server status: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start server"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "starting", "message": "server is starting"})
+}
+
 // HandleStripeWebhook handles Stripe webhook events with proper error handling and deduplication
 func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 	// Read raw request body

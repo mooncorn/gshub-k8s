@@ -8,6 +8,7 @@ import (
 	"github.com/mooncorn/gshub/api/internal/services/auth"
 	"github.com/mooncorn/gshub/api/internal/services/email"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/mooncorn/gshub/api/internal/services/stripe"
 )
 
@@ -17,10 +18,10 @@ type Handlers struct {
 	ServerHandler *ServerHandler
 }
 
-func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client) *Handlers {
+func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, portAllocService *portalloc.Service) *Handlers {
 	authService := auth.NewService(db, cfg)
 	emailService := email.NewService(cfg)
-	stripeService := stripe.NewService(db, cfg)
+	stripeService := stripe.NewService(db, cfg, k8sClient, portAllocService, cfg.K8sNamespace)
 
 	return &Handlers{
 		Config:        cfg,
@@ -31,8 +32,6 @@ func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client) *Ha
 
 // RegisterRoutes registers all API routes
 func (h *Handlers) RegisterRoutes(r *gin.Engine) {
-	api := r.Group("/api/v1")
-
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "healthy",
@@ -40,7 +39,7 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 	})
 
 	// Auth routes (public)
-	authRoutes := api.Group("/auth")
+	authRoutes := r.Group("/auth")
 	{
 		authRoutes.POST("/register", h.AuthHandler.Register)
 		authRoutes.POST("/login", h.AuthHandler.Login)
@@ -53,17 +52,21 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 	}
 
 	// Protected routes
-	protected := r.Group("/api/v1")
+	protected := r.Group("")
 	protected.Use(middleware.AuthMiddleware(h.Config.JWTSecret))
 	{
 		// User profile
 		protected.GET("/me", h.AuthHandler.GetProfile)
 		protected.PATCH("/me", h.AuthHandler.UpdateProfile)
 
-		// Server checkout (protected)
+		// Server management
+		protected.GET("/servers", h.ServerHandler.ListServers)
+		protected.GET("/servers/:id", h.ServerHandler.GetServer)
+		protected.POST("/servers/:id/stop", h.ServerHandler.StopServer)
+		protected.POST("/servers/:id/start", h.ServerHandler.StartServer)
 		protected.POST("/servers/checkout", h.ServerHandler.CreateCheckoutSession)
 	}
 
 	// Stripe webhook (public, signature verified)
-	api.POST("/webhooks/stripe", h.ServerHandler.HandleStripeWebhook)
+	r.POST("/webhooks/stripe", h.ServerHandler.HandleStripeWebhook)
 }
