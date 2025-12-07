@@ -77,6 +77,7 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 		protected.GET("/servers/:id/logs", h.ServerHandler.StreamLogs)
 		protected.POST("/servers/:id/stop", h.ServerHandler.StopServer)
 		protected.POST("/servers/:id/start", h.ServerHandler.StartServer)
+		protected.PUT("/servers/:id/env", h.ServerHandler.UpdateServerEnv)
 		protected.POST("/servers/checkout", h.ServerHandler.CreateCheckoutSession)
 	}
 

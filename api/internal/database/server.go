@@ -68,12 +68,13 @@ func (db *DB) GetServerByID(ctx context.Context, id string) (*models.Server, err
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
 		       creation_error, last_reconciled, stripe_subscription_id,
-		       created_at, updated_at, stopped_at, expired_at, delete_after
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides
 		FROM servers
 		WHERE id = $1
 	`
 
 	var server models.Server
+	var envOverridesJSON []byte
 	err := db.Pool.QueryRow(ctx, query, id).Scan(
 		&server.ID,
 		&server.UserID,
@@ -91,10 +92,17 @@ func (db *DB) GetServerByID(ctx context.Context, id string) (*models.Server, err
 		&server.StoppedAt,
 		&server.ExpiredAt,
 		&server.DeleteAfter,
+		&envOverridesJSON,
 	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server: %w", err)
+	}
+
+	if envOverridesJSON != nil {
+		if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+		}
 	}
 
 	return &server, nil
@@ -106,7 +114,7 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 		SELECT
 			s.id, s.user_id, s.display_name, s.subdomain, s.game, s.plan, s.status, s.status_message,
 			s.creation_error, s.last_reconciled, s.stripe_subscription_id,
-			s.created_at, s.updated_at, s.stopped_at, s.expired_at, s.delete_after,
+			s.created_at, s.updated_at, s.stopped_at, s.expired_at, s.delete_after, s.env_overrides,
 			COALESCE(
 				(SELECT json_agg(json_build_object(
 					'id', pa.id,
@@ -141,7 +149,7 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 	`
 
 	var server models.Server
-	var portsJSON, volumesJSON []byte
+	var portsJSON, volumesJSON, envOverridesJSON []byte
 
 	err := db.Pool.QueryRow(ctx, query, id).Scan(
 		&server.ID,
@@ -160,6 +168,7 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 		&server.StoppedAt,
 		&server.ExpiredAt,
 		&server.DeleteAfter,
+		&envOverridesJSON,
 		&portsJSON,
 		&volumesJSON,
 	)
@@ -177,6 +186,12 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 		return nil, fmt.Errorf("failed to unmarshal volumes: %w", err)
 	}
 
+	if envOverridesJSON != nil {
+		if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+		}
+	}
+
 	return &server, nil
 }
 
@@ -185,7 +200,7 @@ func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
 		       creation_error, last_reconciled, stripe_subscription_id,
-		       created_at, updated_at, stopped_at, expired_at, delete_after
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides
 		FROM servers
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -200,6 +215,7 @@ func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models
 	var servers []models.Server
 	for rows.Next() {
 		var server models.Server
+		var envOverridesJSON []byte
 		err := rows.Scan(
 			&server.ID,
 			&server.UserID,
@@ -217,9 +233,15 @@ func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models
 			&server.StoppedAt,
 			&server.ExpiredAt,
 			&server.DeleteAfter,
+			&envOverridesJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		if envOverridesJSON != nil {
+			if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+			}
 		}
 		servers = append(servers, server)
 	}
@@ -233,7 +255,7 @@ func (db *DB) GetAllServers(ctx context.Context) ([]models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
 		       creation_error, last_reconciled, stripe_subscription_id,
-		       created_at, updated_at, stopped_at, expired_at, delete_after
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides
 		FROM servers
 		WHERE status != 'deleted' OR delete_after > NOW()
 		ORDER BY created_at DESC
@@ -248,6 +270,7 @@ func (db *DB) GetAllServers(ctx context.Context) ([]models.Server, error) {
 	var servers []models.Server
 	for rows.Next() {
 		var server models.Server
+		var envOverridesJSON []byte
 		err := rows.Scan(
 			&server.ID,
 			&server.UserID,
@@ -265,9 +288,15 @@ func (db *DB) GetAllServers(ctx context.Context) ([]models.Server, error) {
 			&server.StoppedAt,
 			&server.ExpiredAt,
 			&server.DeleteAfter,
+			&envOverridesJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		if envOverridesJSON != nil {
+			if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+			}
 		}
 		servers = append(servers, server)
 	}
@@ -530,7 +559,7 @@ func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server,
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
 		       creation_error, last_reconciled, stripe_subscription_id,
-		       created_at, updated_at, stopped_at, expired_at, delete_after
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides
 		FROM servers
 		WHERE delete_after <= NOW() AND status = 'expired'
 		ORDER BY delete_after ASC
@@ -545,6 +574,7 @@ func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server,
 	var servers []models.Server
 	for rows.Next() {
 		var server models.Server
+		var envOverridesJSON []byte
 		err := rows.Scan(
 			&server.ID,
 			&server.UserID,
@@ -562,9 +592,15 @@ func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server,
 			&server.StoppedAt,
 			&server.ExpiredAt,
 			&server.DeleteAfter,
+			&envOverridesJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		if envOverridesJSON != nil {
+			if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+			}
 		}
 		servers = append(servers, server)
 	}
@@ -577,7 +613,7 @@ func (db *DB) GetServersByStatus(ctx context.Context, status string) ([]models.S
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
 		       creation_error, last_reconciled, stripe_subscription_id,
-		       created_at, updated_at, stopped_at, expired_at, delete_after
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides
 		FROM servers
 		WHERE status = $1
 		ORDER BY last_reconciled ASC NULLS FIRST
@@ -592,6 +628,7 @@ func (db *DB) GetServersByStatus(ctx context.Context, status string) ([]models.S
 	var servers []models.Server
 	for rows.Next() {
 		var server models.Server
+		var envOverridesJSON []byte
 		err := rows.Scan(
 			&server.ID,
 			&server.UserID,
@@ -609,12 +646,46 @@ func (db *DB) GetServersByStatus(ctx context.Context, status string) ([]models.S
 			&server.StoppedAt,
 			&server.ExpiredAt,
 			&server.DeleteAfter,
+			&envOverridesJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		if envOverridesJSON != nil {
+			if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+			}
 		}
 		servers = append(servers, server)
 	}
 
 	return servers, nil
+}
+
+// UpdateServerEnvOverrides updates the env_overrides for a server
+func (db *DB) UpdateServerEnvOverrides(ctx context.Context, id string, envOverrides map[string]string) error {
+	query := `
+		UPDATE servers
+		SET env_overrides = $2,
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+
+	var jsonValue interface{}
+	if envOverrides == nil {
+		jsonValue = nil
+	} else {
+		jsonData, err := json.Marshal(envOverrides)
+		if err != nil {
+			return fmt.Errorf("failed to marshal env overrides: %w", err)
+		}
+		jsonValue = jsonData
+	}
+
+	_, err := db.Pool.Exec(ctx, query, id, jsonValue)
+	if err != nil {
+		return fmt.Errorf("failed to update env overrides: %w", err)
+	}
+
+	return nil
 }

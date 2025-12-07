@@ -259,8 +259,11 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		})
 	}
 
+	// Compute effective env (merge catalog defaults with user overrides)
+	effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
+
 	err = r.k8sClient.CreateGameServerWithStaticPorts(ctx, r.k8sNamespace, gsName, gameConfig.Image,
-		nodeName, staticPorts, volumes, gameConfig.Env, planConfig.CPU, planConfig.Memory,
+		nodeName, staticPorts, volumes, effectiveEnv, planConfig.CPU, planConfig.Memory,
 		pvcName, labels, gameConfig.HealthCheck)
 	if err != nil && !isAlreadyExistsError(err) {
 		r.logger.Error("failed to create GameServer", zap.String("server_id", serverID), zap.Error(err))
@@ -303,4 +306,23 @@ func parseCPUToMillicores(cpu string) int {
 func parseMemoryToBytes(memory string) int64 {
 	q := resource.MustParse(memory)
 	return q.Value()
+}
+
+// mergeEnvVars merges catalog defaults with user overrides (full override mode)
+func mergeEnvVars(defaults, overrides map[string]string) map[string]string {
+	if overrides == nil {
+		// NULL overrides = use defaults as-is
+		result := make(map[string]string, len(defaults))
+		for k, v := range defaults {
+			result[k] = v
+		}
+		return result
+	}
+
+	// Full override mode: overrides completely replace defaults
+	result := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		result[k] = v
+	}
+	return result
 }

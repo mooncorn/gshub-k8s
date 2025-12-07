@@ -241,10 +241,106 @@ func (h *ServerHandler) GetServer(c *gin.Context) {
 		}
 	}
 
+	// Load game catalog to get default env
+	var gameConfigInfo *models.GameConfigInfo
+	catalog, err := h.k8sClient.LoadGameCatalog(c.Request.Context(), h.config.K8sNamespace, h.config.K8sGameCatalogName)
+	if err == nil {
+		if gameConfig, err := catalog.GetGameConfig(string(server.Game)); err == nil {
+			effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
+			gameConfigInfo = &models.GameConfigInfo{
+				DefaultEnv:   gameConfig.Env,
+				EffectiveEnv: effectiveEnv,
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"server":    server,
-		"k8s_state": k8sState,
+		"server":      server,
+		"k8s_state":   k8sState,
+		"game_config": gameConfigInfo,
 	})
+}
+
+// UpdateServerEnv updates the environment variable overrides for a server
+func (h *ServerHandler) UpdateServerEnv(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	var req models.UpdateServerEnvRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get server and verify ownership
+	server, err := h.db.GetServerByID(c.Request.Context(), serverID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Validate env keys
+	for key, value := range req.EnvOverrides {
+		if key == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "empty environment variable key"})
+			return
+		}
+		if len(key) > 256 || len(value) > 4096 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "environment variable too long"})
+			return
+		}
+	}
+
+	// Update env overrides in database
+	if err := h.db.UpdateServerEnvOverrides(c.Request.Context(), serverID, req.EnvOverrides); err != nil {
+		log.Printf("failed to update env overrides: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update environment variables"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "updated",
+		"message": "Environment variables updated. Restart server for changes to take effect.",
+	})
+}
+
+// mergeEnvVars merges catalog defaults with user overrides (full override mode)
+func mergeEnvVars(defaults, overrides map[string]string) map[string]string {
+	if overrides == nil {
+		// NULL overrides = use defaults as-is
+		result := make(map[string]string, len(defaults))
+		for k, v := range defaults {
+			result[k] = v
+		}
+		return result
+	}
+
+	// Full override mode: overrides completely replace defaults
+	result := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		result[k] = v
+	}
+	return result
 }
 
 // StopServer stops a running game server by deleting it from K8s
@@ -472,9 +568,12 @@ func (h *ServerHandler) triggerServerStart(server *models.Server) {
 		})
 	}
 
+	// Compute effective env (merge catalog defaults with user overrides)
+	effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
+
 	// Create GameServer
 	if err := h.k8sClient.CreateGameServerWithStaticPorts(ctx, h.config.K8sNamespace, gsName, gameConfig.Image,
-		nodeName, staticPorts, volumes, gameConfig.Env, planConfig.CPU, planConfig.Memory,
+		nodeName, staticPorts, volumes, effectiveEnv, planConfig.CPU, planConfig.Memory,
 		pvcName, labels, gameConfig.HealthCheck); err != nil {
 		log.Printf("triggerServerStart: failed to create GameServer for server %s: %v", serverID, err)
 		return // Reconciler will retry

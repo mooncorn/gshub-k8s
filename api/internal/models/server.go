@@ -8,24 +8,25 @@ import (
 
 // Server represents a game server instance
 type Server struct {
-	ID                   uuid.UUID      `json:"id"`
-	UserID               uuid.UUID      `json:"user_id"`
-	DisplayName          string         `json:"display_name"`
-	Game                 GameType       `json:"game"`
-	Subdomain            string         `json:"subdomain"`
-	Plan                 ServerPlan     `json:"plan"`
-	Status               ServerStatus   `json:"status"`
-	StatusMessage        *string        `json:"status_message,omitempty"`
-	CreationError        *string        `json:"creation_error,omitempty"`
-	LastReconciled       *time.Time     `json:"last_reconciled,omitempty"`
-	Volumes              []ServerVolume `json:"volumes,omitempty"`
-	Ports                []ServerPort   `json:"ports,omitempty"`
-	StripeSubscriptionID *string        `json:"stripe_subscription_id,omitempty"`
-	CreatedAt            time.Time      `json:"created_at"`
-	UpdatedAt            time.Time      `json:"updated_at"`
-	StoppedAt            *time.Time     `json:"stopped_at,omitempty"`
-	ExpiredAt            *time.Time     `json:"expired_at,omitempty"`
-	DeleteAfter          *time.Time     `json:"delete_after,omitempty"`
+	ID                   uuid.UUID         `json:"id"`
+	UserID               uuid.UUID         `json:"user_id"`
+	DisplayName          string            `json:"display_name"`
+	Game                 GameType          `json:"game"`
+	Subdomain            string            `json:"subdomain"`
+	Plan                 ServerPlan        `json:"plan"`
+	Status               ServerStatus      `json:"status"`
+	StatusMessage        *string           `json:"status_message,omitempty"`
+	CreationError        *string           `json:"creation_error,omitempty"`
+	LastReconciled       *time.Time        `json:"last_reconciled,omitempty"`
+	Volumes              []ServerVolume    `json:"volumes,omitempty"`
+	Ports                []ServerPort      `json:"ports,omitempty"`
+	StripeSubscriptionID *string           `json:"stripe_subscription_id,omitempty"`
+	CreatedAt            time.Time         `json:"created_at"`
+	UpdatedAt            time.Time         `json:"updated_at"`
+	StoppedAt            *time.Time        `json:"stopped_at,omitempty"`
+	ExpiredAt            *time.Time        `json:"expired_at,omitempty"`
+	DeleteAfter          *time.Time        `json:"delete_after,omitempty"`
+	EnvOverrides         map[string]string `json:"env_overrides,omitempty"`
 }
 
 // ServerPort represents a single port configuration
@@ -101,4 +102,15 @@ type UpdateServerRequest struct {
 type ServerListResponse struct {
 	Servers []Server `json:"servers"`
 	Total   int      `json:"total"`
+}
+
+// UpdateServerEnvRequest is the payload for updating server environment variables
+type UpdateServerEnvRequest struct {
+	EnvOverrides map[string]string `json:"env_overrides" binding:"required"`
+}
+
+// GameConfigInfo contains game configuration details for the API response
+type GameConfigInfo struct {
+	DefaultEnv   map[string]string `json:"default_env"`
+	EffectiveEnv map[string]string `json:"effective_env"`
 }

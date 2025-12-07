@@ -1,20 +1,49 @@
 import { useParams, Link } from "react-router-dom"
-import { useRef, useEffect } from "react"
+import { useRef, useEffect, useState } from "react"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useServer } from "@/hooks/useServer"
 import { useStartServer, useStopServer } from "@/hooks/useServerActions"
 import { useServerLogs } from "@/hooks/useServerLogs"
 import { ServerStatusBadge } from "@/components/servers/ServerStatusBadge"
+import { EnvEditor } from "@/components/servers/EnvEditor"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Separator } from "@/components/ui/separator"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { GAMES, PLANS } from "@/lib/constants"
+import { serversApi } from "@/api/servers"
 
 export function ServerDetailPage() {
   const { id } = useParams<{ id: string }>()
+  const queryClient = useQueryClient()
   const { data, isLoading, error } = useServer(id!)
   const startServer = useStartServer()
   const stopServer = useStopServer()
+  const [envUpdateMessage, setEnvUpdateMessage] = useState<{
+    type: "success" | "error"
+    text: string
+  } | null>(null)
+
+  const updateEnv = useMutation({
+    mutationFn: (envOverrides: Record<string, string>) =>
+      serversApi.updateEnv(id!, envOverrides),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["server", id] })
+      setEnvUpdateMessage({
+        type: "success",
+        text: "Environment variables saved. Restart server for changes to take effect.",
+      })
+      setTimeout(() => setEnvUpdateMessage(null), 5000)
+    },
+    onError: () => {
+      setEnvUpdateMessage({
+        type: "error",
+        text: "Failed to save environment variables.",
+      })
+      setTimeout(() => setEnvUpdateMessage(null), 5000)
+    },
+  })
 
   // Log streaming - only enabled when server is in a loggable state
   const server = data?.server
@@ -200,6 +229,23 @@ export function ServerDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {envUpdateMessage && (
+        <Alert
+          variant={envUpdateMessage.type === "error" ? "destructive" : "default"}
+        >
+          <AlertDescription>{envUpdateMessage.text}</AlertDescription>
+        </Alert>
+      )}
+
+      <EnvEditor
+        game={serverData.game}
+        gameConfig={data.game_config}
+        onSave={async (envOverrides) => {
+          await updateEnv.mutateAsync(envOverrides)
+        }}
+        disabled={updateEnv.isPending}
+      />
 
       {showLogs && (
         <Card>

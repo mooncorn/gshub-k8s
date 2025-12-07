@@ -33,6 +33,7 @@ export interface Server {
   status: ServerStatus
   status_message?: string
   ports?: ServerPort[]
+  env_overrides?: Record<string, string>
   created_at: string
   updated_at: string
 }
@@ -42,9 +43,15 @@ export interface ServerListResponse {
   total: number
 }
 
+export interface GameConfigInfo {
+  default_env: Record<string, string>
+  effective_env: Record<string, string>
+}
+
 export interface ServerDetailResponse {
   server: Server
   k8s_state?: string
+  game_config?: GameConfigInfo
 }
 
 export interface CheckoutResponse {
@@ -75,5 +82,10 @@ export const serversApi = {
       subdomain,
       game,
       plan,
+    }),
+
+  updateEnv: (id: string, envOverrides: Record<string, string>) =>
+    client.put<{ status: string; message: string }>(`/servers/${id}/env`, {
+      env_overrides: envOverrides,
     }),
 }
