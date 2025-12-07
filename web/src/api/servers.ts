@@ -19,6 +19,7 @@ export interface ServerPort {
   name: string
   container_port: number
   host_port?: number
+  node_ip?: string
   protocol: string
 }
 
@@ -31,7 +32,6 @@ export interface Server {
   plan: ServerPlan
   status: ServerStatus
   status_message?: string
-  node_ip?: string
   ports?: ServerPort[]
   created_at: string
   updated_at: string

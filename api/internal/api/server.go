@@ -18,6 +18,7 @@ import (
 	"github.com/mooncorn/gshub/api/internal/api/middleware"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
+	"github.com/mooncorn/gshub/api/internal/services/broadcast"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	stripeservice "github.com/mooncorn/gshub/api/internal/services/stripe"
@@ -31,15 +32,17 @@ type ServerHandler struct {
 	config           *config.Config
 	stripeService    *stripeservice.Service
 	portAllocService *portalloc.Service
+	hub              *broadcast.Hub
 }
 
-func NewServerHandler(db *database.DB, k8sClient *k8s.Client, cfg *config.Config, stripeSvc *stripeservice.Service, portAllocSvc *portalloc.Service) *ServerHandler {
+func NewServerHandler(db *database.DB, k8sClient *k8s.Client, cfg *config.Config, stripeSvc *stripeservice.Service, portAllocSvc *portalloc.Service, hub *broadcast.Hub) *ServerHandler {
 	return &ServerHandler{
 		db:               db,
 		k8sClient:        k8sClient,
 		config:           cfg,
 		stripeService:    stripeSvc,
 		portAllocService: portAllocSvc,
+		hub:              hub,
 	}
 }
 
@@ -707,4 +710,96 @@ func (h *ServerHandler) StreamLogs(c *gin.Context) {
 		"message": "Log stream ended",
 	})
 	c.Writer.Flush()
+}
+
+// StreamStatus streams real-time status updates for all user's servers via SSE
+func (h *ServerHandler) StreamStatus(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	// Create context that cancels when client disconnects
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	// Subscribe to hub for this user's events
+	eventCh := h.hub.Subscribe(userID)
+	defer h.hub.Unsubscribe(userID, eventCh)
+
+	// Get all user's servers and send initial state
+	servers, err := h.db.ListServersByUser(ctx, userID)
+	if err != nil {
+		log.Printf("failed to list servers for user %s: %v", userID, err)
+		c.SSEvent("error", gin.H{
+			"message": "Failed to get servers",
+			"details": err.Error(),
+		})
+		c.Writer.Flush()
+		return
+	}
+
+	// Build initial state for all servers
+	initialServers := make([]gin.H, len(servers))
+	for i, server := range servers {
+		initialServers[i] = gin.H{
+			"server_id":      server.ID.String(),
+			"status":         server.Status,
+			"status_message": server.StatusMessage,
+		}
+	}
+
+	// Send initial connection event with all server states
+	c.SSEvent("connected", gin.H{
+		"servers":   initialServers,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+	c.Writer.Flush()
+
+	// Start heartbeat ticker
+	heartbeatTicker := time.NewTicker(30 * time.Second)
+	defer heartbeatTicker.Stop()
+
+	log.Printf("status streaming started for user %s", userID)
+
+	// Stream events
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("status streaming ended for user %s: client disconnected", userID)
+			return
+
+		case event, ok := <-eventCh:
+			if !ok {
+				// Channel closed
+				return
+			}
+			c.SSEvent("status", gin.H{
+				"server_id":      event.ServerID,
+				"status":         event.Status,
+				"status_message": event.StatusMessage,
+				"timestamp":      event.Timestamp.Format(time.RFC3339),
+			})
+			c.Writer.Flush()
+
+		case <-heartbeatTicker.C:
+			c.SSEvent("heartbeat", gin.H{
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+			c.Writer.Flush()
+		}
+	}
 }

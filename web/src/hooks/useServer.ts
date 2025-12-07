@@ -1,12 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
-import { serversApi, type ServerStatus } from "@/api/servers"
+import { serversApi } from "@/api/servers"
 
-const TRANSITIONAL_STATES: ServerStatus[] = [
-  "pending",
-  "starting",
-  "stopping",
-  "deleting",
-]
+// Note: Real-time status updates are handled by useServerStatus hook via SSE.
+// This hook no longer polls - it only fetches the initial state.
+// The SSE stream updates the React Query cache directly.
 
 export function useServer(id: string) {
   return useQuery({
@@ -15,12 +12,6 @@ export function useServer(id: string) {
       const res = await serversApi.get(id)
       return res.data
     },
-    refetchInterval: (query) => {
-      const data = query.state.data
-      if (data && TRANSITIONAL_STATES.includes(data.server.status)) {
-        return 5000
-      }
-      return false
-    },
+    // No refetchInterval - SSE handles real-time updates
   })
 }

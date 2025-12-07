@@ -25,7 +25,7 @@ func (db *DB) CreateServer(ctx context.Context, serverParams *CreateServerParams
 			user_id, display_name, subdomain, game, plan, stripe_subscription_id
 		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, user_id, display_name, subdomain, game, plan, status, status_message,
-		          node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		          creation_error, last_reconciled, stripe_subscription_id,
 		          created_at, updated_at, stopped_at, expired_at, delete_after
 	`
 
@@ -46,8 +46,6 @@ func (db *DB) CreateServer(ctx context.Context, serverParams *CreateServerParams
 		&server.Plan,
 		&server.Status,
 		&server.StatusMessage,
-		&server.NodeIP,
-		&server.PodIP,
 		&server.CreationError,
 		&server.LastReconciled,
 		&server.StripeSubscriptionID,
@@ -69,7 +67,7 @@ func (db *DB) CreateServer(ctx context.Context, serverParams *CreateServerParams
 func (db *DB) GetServerByID(ctx context.Context, id string) (*models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		       creation_error, last_reconciled, stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE id = $1
@@ -85,8 +83,6 @@ func (db *DB) GetServerByID(ctx context.Context, id string) (*models.Server, err
 		&server.Plan,
 		&server.Status,
 		&server.StatusMessage,
-		&server.NodeIP,
-		&server.PodIP,
 		&server.CreationError,
 		&server.LastReconciled,
 		&server.StripeSubscriptionID,
@@ -109,7 +105,7 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 	query := `
 		SELECT
 			s.id, s.user_id, s.display_name, s.subdomain, s.game, s.plan, s.status, s.status_message,
-			s.node_ip, s.pod_ip, s.creation_error, s.last_reconciled, s.stripe_subscription_id,
+			s.creation_error, s.last_reconciled, s.stripe_subscription_id,
 			s.created_at, s.updated_at, s.stopped_at, s.expired_at, s.delete_after,
 			COALESCE(
 				(SELECT json_agg(json_build_object(
@@ -118,10 +114,12 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 					'name', pa.port_name,
 					'container_port', 0,
 					'host_port', pa.port,
+					'node_ip', n.public_ip,
 					'protocol', pa.protocol,
 					'created_at', pa.created_at
 				) ORDER BY pa.port_name)
 				FROM port_allocations pa
+				JOIN nodes n ON n.id = pa.node_id
 				WHERE pa.server_id = s.id),
 				'[]'::json
 			) as ports,
@@ -154,8 +152,6 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 		&server.Plan,
 		&server.Status,
 		&server.StatusMessage,
-		&server.NodeIP,
-		&server.PodIP,
 		&server.CreationError,
 		&server.LastReconciled,
 		&server.StripeSubscriptionID,
@@ -188,7 +184,7 @@ func (db *DB) GetServerByIDWithDetails(ctx context.Context, id string) (*models.
 func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		       creation_error, last_reconciled, stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE user_id = $1
@@ -213,8 +209,6 @@ func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models
 			&server.Plan,
 			&server.Status,
 			&server.StatusMessage,
-			&server.NodeIP,
-			&server.PodIP,
 			&server.CreationError,
 			&server.LastReconciled,
 			&server.StripeSubscriptionID,
@@ -238,7 +232,7 @@ func (db *DB) ListServersByUser(ctx context.Context, userID uuid.UUID) ([]models
 func (db *DB) GetAllServers(ctx context.Context) ([]models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		       creation_error, last_reconciled, stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE status != 'deleted' OR delete_after > NOW()
@@ -263,8 +257,6 @@ func (db *DB) GetAllServers(ctx context.Context) ([]models.Server, error) {
 			&server.Plan,
 			&server.Status,
 			&server.StatusMessage,
-			&server.NodeIP,
-			&server.PodIP,
 			&server.CreationError,
 			&server.LastReconciled,
 			&server.StripeSubscriptionID,
@@ -335,46 +327,17 @@ func (db *DB) TransitionServerStatusFrom(ctx context.Context, id string, fromSta
 	return result.RowsAffected() == 1, nil
 }
 
-// UpdateServerInfo updates IP and port (used by reconciler)
-func (db *DB) UpdateServerInfo(ctx context.Context, id, nodeIP string) error {
-	query := `
-        UPDATE servers
-        SET node_ip = $2,
-            updated_at = NOW()
-        WHERE id = $1
-    `
-	_, err := db.Pool.Exec(ctx, query, id, nodeIP)
-	return err
-}
-
-// UpdateServerToRunning transitions server to running with full info
-func (db *DB) UpdateServerToRunning(ctx context.Context, id, nodeIP string) error {
+// UpdateServerToRunning transitions server to running state
+func (db *DB) UpdateServerToRunning(ctx context.Context, id string) error {
 	query := `
         UPDATE servers
         SET status = 'running',
             status_message = NULL,
-            node_ip = $2,
             updated_at = NOW()
         WHERE id = $1
     `
-	_, err := db.Pool.Exec(ctx, query, id, nodeIP)
+	_, err := db.Pool.Exec(ctx, query, id)
 	return err
-}
-
-// UpdateServerPodIP updates the pod IP and marks reconciliation as complete
-func (db *DB) UpdateServerPodIP(ctx context.Context, id, podIP string) error {
-	query := `
-		UPDATE servers
-		SET pod_ip = $2,
-		    last_reconciled = NOW(),
-		    updated_at = NOW()
-		WHERE id = $1
-	`
-	_, err := db.Pool.Exec(ctx, query, id, podIP)
-	if err != nil {
-		return fmt.Errorf("failed to update server pod IP: %w", err)
-	}
-	return nil
 }
 
 // MarkServerFailed marks a server as failed with an error message
@@ -457,20 +420,6 @@ func (db *DB) HardDeleteServer(ctx context.Context, id string) error {
 	return nil
 }
 
-// UpdateServerNodeIP updates the node IP where server is running
-func (db *DB) UpdateServerNodeIP(ctx context.Context, serverID, nodeIP string) error {
-	query := `
-        UPDATE servers
-        SET node_ip = $2, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-    `
-	_, err := db.Pool.Exec(ctx, query, serverID, nodeIP)
-	if err != nil {
-		return fmt.Errorf("failed to update server node IP: %w", err)
-	}
-	return nil
-}
-
 // CreateServerVolume inserts a volume configuration
 func (db *DB) CreateServerVolume(ctx context.Context, vol *models.ServerVolume) error {
 	query := `
@@ -522,7 +471,7 @@ func (db *DB) GetServerVolumes(ctx context.Context, serverID string) ([]models.S
 func (db *DB) GetServerByStripeSubscriptionID(ctx context.Context, subscriptionID string) (*models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, stripe_subscription_id,
+		       stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE stripe_subscription_id = $1
@@ -538,7 +487,6 @@ func (db *DB) GetServerByStripeSubscriptionID(ctx context.Context, subscriptionI
 		&server.Plan,
 		&server.Status,
 		&server.StatusMessage,
-		&server.NodeIP,
 		&server.StripeSubscriptionID,
 		&server.CreatedAt,
 		&server.UpdatedAt,
@@ -555,7 +503,7 @@ func (db *DB) GetServerByStripeSubscriptionID(ctx context.Context, subscriptionI
 }
 
 // MarkServerExpired marks a server as expired due to subscription end
-// Clears node_name and resource reservations since ports are released separately
+// Clears resource reservations since ports are released separately
 // PVC remains for the 7-day grace period
 func (db *DB) MarkServerExpired(ctx context.Context, id string) error {
 	query := `
@@ -563,7 +511,6 @@ func (db *DB) MarkServerExpired(ctx context.Context, id string) error {
 		SET status = 'expired',
 		    expired_at = NOW(),
 		    delete_after = NOW() + interval '7 days',
-		    node_name = NULL,
 		    reserved_cpu_millicores = NULL,
 		    reserved_memory_bytes = NULL,
 		    updated_at = NOW()
@@ -582,7 +529,7 @@ func (db *DB) MarkServerExpired(ctx context.Context, id string) error {
 func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		       creation_error, last_reconciled, stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE delete_after <= NOW() AND status = 'expired'
@@ -607,8 +554,6 @@ func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server,
 			&server.Plan,
 			&server.Status,
 			&server.StatusMessage,
-			&server.NodeIP,
-			&server.PodIP,
 			&server.CreationError,
 			&server.LastReconciled,
 			&server.StripeSubscriptionID,
@@ -631,7 +576,7 @@ func (db *DB) GetExpiredServersForCleanup(ctx context.Context) ([]models.Server,
 func (db *DB) GetServersByStatus(ctx context.Context, status string) ([]models.Server, error) {
 	query := `
 		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
-		       node_ip, pod_ip, creation_error, last_reconciled, stripe_subscription_id,
+		       creation_error, last_reconciled, stripe_subscription_id,
 		       created_at, updated_at, stopped_at, expired_at, delete_after
 		FROM servers
 		WHERE status = $1
@@ -656,8 +601,6 @@ func (db *DB) GetServersByStatus(ctx context.Context, status string) ([]models.S
 			&server.Plan,
 			&server.Status,
 			&server.StatusMessage,
-			&server.NodeIP,
-			&server.PodIP,
 			&server.CreationError,
 			&server.LastReconciled,
 			&server.StripeSubscriptionID,

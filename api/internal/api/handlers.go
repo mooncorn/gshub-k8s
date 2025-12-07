@@ -7,6 +7,7 @@ import (
 	"github.com/mooncorn/gshub/api/internal/api/middleware"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/services/auth"
+	"github.com/mooncorn/gshub/api/internal/services/broadcast"
 	"github.com/mooncorn/gshub/api/internal/services/email"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
@@ -19,7 +20,7 @@ type Handlers struct {
 	ServerHandler *ServerHandler
 }
 
-func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, portAllocService *portalloc.Service) *Handlers {
+func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, portAllocService *portalloc.Service, hub *broadcast.Hub) *Handlers {
 	authService := auth.NewService(db, cfg)
 	emailService := email.NewService(cfg)
 	stripeService := stripe.NewService(db, cfg, k8sClient, portAllocService, cfg.K8sNamespace)
@@ -27,7 +28,7 @@ func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, por
 	return &Handlers{
 		Config:        cfg,
 		AuthHandler:   NewAuthHandler(authService, emailService),
-		ServerHandler: NewServerHandler(db, k8sClient, cfg, stripeService, portAllocService),
+		ServerHandler: NewServerHandler(db, k8sClient, cfg, stripeService, portAllocService, hub),
 	}
 }
 
@@ -71,6 +72,7 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 
 		// Server management
 		protected.GET("/servers", h.ServerHandler.ListServers)
+		protected.GET("/servers/status", h.ServerHandler.StreamStatus) // SSE endpoint for real-time status updates
 		protected.GET("/servers/:id", h.ServerHandler.GetServer)
 		protected.GET("/servers/:id/logs", h.ServerHandler.StreamLogs)
 		protected.POST("/servers/:id/stop", h.ServerHandler.StopServer)

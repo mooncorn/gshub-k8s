@@ -12,11 +12,13 @@ import (
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/api"
 	"github.com/mooncorn/gshub/api/internal/database"
+	"github.com/mooncorn/gshub/api/internal/services/broadcast"
 	"github.com/mooncorn/gshub/api/internal/services/cleanup"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"github.com/mooncorn/gshub/api/internal/services/nodesync"
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/mooncorn/gshub/api/internal/services/reconciler"
+	"github.com/mooncorn/gshub/api/internal/services/watcher"
 	"go.uber.org/zap"
 )
 
@@ -77,6 +79,16 @@ func main() {
 	portAllocService := portalloc.NewService(database, logger)
 	log.Println("Port allocation service initialized")
 
+	// Initialize broadcast hub for real-time SSE updates
+	hub := broadcast.NewHub(logger)
+	log.Println("Broadcast hub initialized")
+
+	// Initialize and start GameServer watcher for real-time K8s state updates
+	watcherService := watcher.NewService(database, k8sClient.AgonesClientset(), hub, logger, cfg.K8sNamespace)
+	watcherService.Start(ctx)
+	defer watcherService.Stop()
+	log.Println("GameServer watcher started")
+
 	// Initialize and start node sync service
 	nodeSyncConfig := nodesync.Config{
 		PortRangeMin:  cfg.PortRangeMin,
@@ -108,7 +120,7 @@ func main() {
 
 	log.Println("Cleanup service started")
 
-	handlers := api.NewHandlers(database, cfg, k8sClient, portAllocService)
+	handlers := api.NewHandlers(database, cfg, k8sClient, portAllocService, hub)
 	r := gin.Default()
 	handlers.RegisterRoutes(r)
 

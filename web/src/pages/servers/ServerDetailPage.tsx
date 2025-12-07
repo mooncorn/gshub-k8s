@@ -81,8 +81,8 @@ export function ServerDetailPage() {
 
   const gamePort = serverData.ports?.find((p) => p.name === "game")
   const connectionAddress =
-    serverData.node_ip && gamePort?.host_port
-      ? `${serverData.node_ip}:${gamePort.host_port}`
+    gamePort?.node_ip && gamePort?.host_port
+      ? `${gamePort.node_ip}:${gamePort.host_port}`
       : null
 
   return (

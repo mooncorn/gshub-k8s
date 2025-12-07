@@ -41,7 +41,6 @@ func Test_CreateServer(t *testing.T) {
 	assert.Equal(t, server.Plan, models.PlanSmall, "Plan should match")
 	assert.Equal(t, server.Status, models.ServerStatusPending, "Status should be pending by default")
 	assert.Nil(t, server.StatusMessage, "StatusMessage should be nil initially")
-	assert.Nil(t, server.NodeIP, "NodeIP should be nil initially")
 	assert.Nil(t, server.StripeSubscriptionID, "StripeSubscriptionID should be nil initially")
 	assert.NotZero(t, server.CreatedAt, "CreatedAt should be set")
 	assert.NotZero(t, server.UpdatedAt, "UpdatedAt should be set")
@@ -90,7 +89,6 @@ func Test_GetServerByID(t *testing.T) {
 	assert.Equal(t, models.PlanSmall, retrievedServer.Plan, "Plan should match")
 	assert.Equal(t, models.ServerStatusPending, retrievedServer.Status, "Status should match")
 	assert.Nil(t, retrievedServer.StatusMessage, "StatusMessage should be nil")
-	assert.Nil(t, retrievedServer.NodeIP, "NodeIP should be nil")
 	assert.Nil(t, retrievedServer.StripeSubscriptionID, "StripeSubscriptionID should be nil")
 	assert.NotZero(t, retrievedServer.CreatedAt, "CreatedAt should be set")
 	assert.NotZero(t, retrievedServer.UpdatedAt, "UpdatedAt should be set")
@@ -435,45 +433,6 @@ func Test_UpdateServerStatus(t *testing.T) {
 	assert.Equal(t, "", *failedServer.StatusMessage, "Status message should be empty string")
 }
 
-func Test_UpdateServerInfo(t *testing.T) {
-	db, cleanup := setupTest(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	// Create user and server
-	user, err := db.CreateUser(ctx, RandomEmail(), "password_hash")
-	require.NoError(t, err, "CreateUser should not return an error")
-
-	server, err := db.CreateServer(ctx, &CreateServerParams{
-		UserID:      user.ID,
-		DisplayName: "Test Server",
-		Subdomain:   RandomSubdomain(),
-		Game:        models.GameMinecraft,
-		Plan:        models.PlanSmall,
-	})
-	require.NoError(t, err, "CreateServer should not return an error")
-
-	// Verify initial node_ip is nil
-	assert.Nil(t, server.NodeIP, "Initial node_ip should be nil")
-
-	// Update node IP
-	nodeIP := "192.168.1.100"
-	err = db.UpdateServerInfo(ctx, server.ID.String(), nodeIP)
-	require.NoError(t, err, "UpdateServerInfo should not return an error")
-
-	// Retrieve updated server
-	updatedServer, err := db.GetServerByID(ctx, server.ID.String())
-	require.NoError(t, err, "GetServerByID should not return an error")
-
-	// Verify node_ip was updated
-	assert.NotNil(t, updatedServer.NodeIP, "NodeIP should be set")
-	assert.Equal(t, nodeIP, *updatedServer.NodeIP, "NodeIP should match")
-
-	// Verify status remains unchanged
-	assert.Equal(t, server.Status, updatedServer.Status, "Status should remain unchanged")
-}
-
 func Test_UpdateServerToRunning(t *testing.T) {
 	db, cleanup := setupTest(t)
 	defer cleanup()
@@ -498,8 +457,7 @@ func Test_UpdateServerToRunning(t *testing.T) {
 	require.NoError(t, err, "UpdateServerStatus should not return an error")
 
 	// Transition to running
-	nodeIP := "10.0.0.50"
-	err = db.UpdateServerToRunning(ctx, server.ID.String(), nodeIP)
+	err = db.UpdateServerToRunning(ctx, server.ID.String())
 	require.NoError(t, err, "UpdateServerToRunning should not return an error")
 
 	// Retrieve updated server
@@ -511,10 +469,6 @@ func Test_UpdateServerToRunning(t *testing.T) {
 
 	// Verify status_message was cleared
 	assert.Nil(t, runningServer.StatusMessage, "StatusMessage should be cleared (NULL)")
-
-	// Verify node_ip was set
-	assert.NotNil(t, runningServer.NodeIP, "NodeIP should be set")
-	assert.Equal(t, nodeIP, *runningServer.NodeIP, "NodeIP should match")
 }
 
 func Test_MarkServerStopped(t *testing.T) {
@@ -537,7 +491,7 @@ func Test_MarkServerStopped(t *testing.T) {
 	require.NoError(t, err, "CreateServer should not return an error")
 
 	// Set to running first
-	err = db.UpdateServerToRunning(ctx, server.ID.String(), "10.0.0.1")
+	err = db.UpdateServerToRunning(ctx, server.ID.String())
 	require.NoError(t, err, "UpdateServerToRunning should not return an error")
 
 	// Verify stopped_at is nil initially

@@ -80,6 +80,11 @@ func NewClient() (*Client, error) {
 	}, nil
 }
 
+// AgonesClientset returns the Agones clientset for use with informers
+func (c *Client) AgonesClientset() *agonesclient.Clientset {
+	return c.agonesClientset
+}
+
 // Health checks connectivity to the Kubernetes API server
 func (c *Client) Health(ctx context.Context) error {
 	_, err := c.clientset.Discovery().ServerVersion()

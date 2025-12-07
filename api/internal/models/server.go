@@ -16,8 +16,6 @@ type Server struct {
 	Plan                 ServerPlan     `json:"plan"`
 	Status               ServerStatus   `json:"status"`
 	StatusMessage        *string        `json:"status_message,omitempty"`
-	NodeIP               *string        `json:"node_ip,omitempty"`
-	PodIP                *string        `json:"pod_ip,omitempty"`
 	CreationError        *string        `json:"creation_error,omitempty"`
 	LastReconciled       *time.Time     `json:"last_reconciled,omitempty"`
 	Volumes              []ServerVolume `json:"volumes,omitempty"`
@@ -36,7 +34,8 @@ type ServerPort struct {
 	ServerID      string    `json:"server_id"`
 	Name          string    `json:"name"`                // "game", "query", "rcon"
 	ContainerPort int       `json:"container_port"`      // Port in container
-	HostPort      *int      `json:"host_port,omitempty"` // Allocated by Agones
+	HostPort      *int      `json:"host_port,omitempty"` // Allocated host port
+	NodeIP        *string   `json:"node_ip,omitempty"`   // Public IP of hosting node
 	Protocol      string    `json:"protocol"`            // "TCP" or "UDP"
 	CreatedAt     time.Time `json:"created_at"`
 }

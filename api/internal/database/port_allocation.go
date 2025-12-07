@@ -180,6 +180,7 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 
 	if resourceReq != nil {
 		// Query with resource checking - only considers nodes with resource data
+		// Resource reservations are linked via port_allocations (server -> port_allocations -> node)
 		nodeQuery = `
 			SELECT n.id, n.name, n.public_ip
 			FROM nodes n
@@ -196,10 +197,11 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'UDP'
 			) >= $2
 			-- Resource availability (capacity - sum of active reservations)
+			-- Derive node via port_allocations instead of node_name
 			AND (
 				n.allocatable_cpu_millicores - COALESCE(
 					(SELECT SUM(s.reserved_cpu_millicores) FROM servers s
-					 WHERE s.node_name = n.name
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
 					   AND s.status NOT IN ('deleted', 'expired', 'failed')
 					   AND s.reserved_cpu_millicores IS NOT NULL), 0
 				)
@@ -207,7 +209,7 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 			AND (
 				n.allocatable_memory_bytes - COALESCE(
 					(SELECT SUM(s.reserved_memory_bytes) FROM servers s
-					 WHERE s.node_name = n.name
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
 					   AND s.status NOT IN ('deleted', 'expired', 'failed')
 					   AND s.reserved_memory_bytes IS NOT NULL), 0
 				)
@@ -292,21 +294,17 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 		})
 	}
 
-	// Update server's node_name and resource reservations
-	var serverUpdateQuery string
+	// Update server's resource reservations (node is derived from port_allocations)
 	if resourceReq != nil {
-		serverUpdateQuery = `
+		serverUpdateQuery := `
 			UPDATE servers
-			SET node_name = $1, reserved_cpu_millicores = $2, reserved_memory_bytes = $3
-			WHERE id = $4
+			SET reserved_cpu_millicores = $1, reserved_memory_bytes = $2
+			WHERE id = $3
 		`
-		_, err = tx.Exec(ctx, serverUpdateQuery, node.Name, resourceReq.CPUMillicores, resourceReq.MemoryBytes, serverID)
-	} else {
-		serverUpdateQuery = `UPDATE servers SET node_name = $1 WHERE id = $2`
-		_, err = tx.Exec(ctx, serverUpdateQuery, node.Name, serverID)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to update server: %w", err)
+		_, err = tx.Exec(ctx, serverUpdateQuery, resourceReq.CPUMillicores, resourceReq.MemoryBytes, serverID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to update server: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
