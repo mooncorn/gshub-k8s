@@ -74,8 +74,8 @@ func (s *Service) CreateCheckoutSession(ctx context.Context, userID uuid.UUID, p
 	// Create checkout session parameters
 	params := &stripe.CheckoutSessionParams{
 		Mode:          stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-		SuccessURL:    stripe.String(s.config.FrontendURL + "/servers/checkout/success?session_id={CHECKOUT_SESSION_ID}"),
-		CancelURL:     stripe.String(s.config.FrontendURL + "/servers"),
+		SuccessURL:    stripe.String(s.config.FrontendURL + "/"),
+		CancelURL:     stripe.String(s.config.FrontendURL + "/servers/new"),
 		CustomerEmail: stripe.String(email),
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
 			{
@@ -193,28 +193,48 @@ func (s *Service) handleSubscriptionDeleted(ctx context.Context, event *stripe.E
 
 	serverID := server.ID.String()
 
-	// 1. Delete GameServer from K8s (if running)
+	// 1. Atomically transition to expired from any active state
+	// This prevents race conditions with concurrent stop/start operations
+	transitioned, err := s.db.TransitionServerStatusFrom(ctx, serverID,
+		[]models.ServerStatus{
+			models.ServerStatusPending,
+			models.ServerStatusStarting,
+			models.ServerStatusRunning,
+			models.ServerStatusStopping,
+			models.ServerStatusStopped,
+		},
+		models.ServerStatusExpired,
+		"Subscription cancelled",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to transition server to expired: event_id=%s server_id=%s error=%w", event.ID, serverID, err)
+	}
+
+	if !transitioned {
+		// Server was already expired/failed/deleted - that's fine
+		log.Printf("Server already in terminal state: event_id=%s server_id=%s status=%s", event.ID, serverID, server.Status)
+		return nil
+	}
+
+	// 2. Set expiration metadata (timestamps, clear resource reservations)
+	if err := s.db.MarkServerExpired(ctx, serverID); err != nil {
+		log.Printf("Failed to set expiration metadata: event_id=%s server_id=%s error=%v", event.ID, serverID, err)
+		// Continue - status is already expired, timestamps are secondary
+	}
+
+	// 3. Delete GameServer from K8s (idempotent - may not exist if stopped)
 	gsName := "server-" + serverID
 	if err := s.k8sClient.DeleteGameServer(ctx, s.k8sNamespace, gsName); err != nil {
 		log.Printf("Failed to delete GameServer (may not exist): event_id=%s server_id=%s error=%v", event.ID, serverID, err)
-		// Continue - GameServer may not exist if server was already stopped
 	} else {
 		log.Printf("Deleted GameServer: event_id=%s server_id=%s", event.ID, serverID)
 	}
 
-	// 2. Release port allocations
+	// 4. Release port allocations (idempotent - may not be allocated)
 	if err := s.portAllocService.ReleasePorts(ctx, server.ID); err != nil {
 		log.Printf("Failed to release ports: event_id=%s server_id=%s error=%v", event.ID, serverID, err)
-		// Continue - ports may not be allocated
 	} else {
 		log.Printf("Released ports: event_id=%s server_id=%s", event.ID, serverID)
-	}
-
-	// 3. Mark server as expired (clears node_name and resource reservations, sets 7-day grace period)
-	// PVC is NOT deleted here - it remains for the 7-day grace period
-	err = s.db.MarkServerExpired(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("failed to mark server expired: event_id=%s server_id=%s subscription_id=%s error=%w", event.ID, server.ID, sub.ID, err)
 	}
 
 	log.Printf("Server marked as expired: event_id=%s server_id=%s subscription_id=%s delete_after=+7days", event.ID, server.ID, sub.ID)

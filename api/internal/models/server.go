@@ -55,12 +55,15 @@ type ServerVolume struct {
 type ServerStatus string
 
 const (
-	ServerStatusPending ServerStatus = "pending" // Server created in DB, K8s resources not yet created
-	ServerStatusRunning ServerStatus = "running" // K8s pod is running and healthy
-	ServerStatusStopped ServerStatus = "stopped" // User stopped the server (pod deleted, PVC preserved)
-	ServerStatusExpired ServerStatus = "expired" // Subscription expired, server stopped
-	ServerStatusFailed  ServerStatus = "failed"  // Something went wrong during creation/runtime
-	ServerStatusDeleted ServerStatus = "deleted" // Soft deleted, cleanup in progress
+	ServerStatusPending  ServerStatus = "pending"  // Server created in DB, K8s resources not yet created
+	ServerStatusStarting ServerStatus = "starting" // K8s GameServer created, waiting for pod Ready
+	ServerStatusRunning  ServerStatus = "running"  // K8s pod is running and healthy
+	ServerStatusStopping ServerStatus = "stopping" // Stop requested, waiting for K8s deletion
+	ServerStatusStopped  ServerStatus = "stopped"  // User stopped the server (pod deleted, PVC preserved)
+	ServerStatusExpired  ServerStatus = "expired"  // Subscription expired, server stopped
+	ServerStatusFailed   ServerStatus = "failed"   // Something went wrong during creation/runtime
+	ServerStatusDeleting ServerStatus = "deleting" // Hard delete in progress, PVC being deleted
+	ServerStatusDeleted  ServerStatus = "deleted"  // All resources cleaned up, ready for DB deletion
 )
 
 // Game type constants

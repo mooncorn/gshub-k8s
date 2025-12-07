@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/api/middleware"
@@ -26,12 +27,21 @@ func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, por
 	return &Handlers{
 		Config:        cfg,
 		AuthHandler:   NewAuthHandler(authService, emailService),
-		ServerHandler: NewServerHandler(db, k8sClient, cfg, stripeService),
+		ServerHandler: NewServerHandler(db, k8sClient, cfg, stripeService, portAllocService),
 	}
 }
 
 // RegisterRoutes registers all API routes
 func (h *Handlers) RegisterRoutes(r *gin.Engine) {
+	// Configure CORS
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     h.Config.AllowedOrigins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+	}))
+
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "healthy",

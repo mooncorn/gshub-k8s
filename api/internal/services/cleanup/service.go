@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mooncorn/gshub/api/internal/database"
+	"github.com/mooncorn/gshub/api/internal/models"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"go.uber.org/zap"
 )
@@ -99,13 +100,36 @@ func (s *Service) runCleanup(ctx context.Context) {
 		serverID := server.ID.String()
 		pvcName := fmt.Sprintf("server-%s", serverID)
 
-		// Delete PVC from K8s
+		// Step 1: Atomically transition expired -> deleting
+		// This prevents concurrent cleanup attempts
+		transitioned, err := s.db.TransitionServerStatus(ctx, serverID,
+			models.ServerStatusExpired, models.ServerStatusDeleting, "Cleaning up resources...")
+		if err != nil {
+			s.logger.Error("failed to transition to deleting",
+				zap.String("server_id", serverID),
+				zap.Error(err),
+			)
+			failureCount++
+			continue
+		}
+		if !transitioned {
+			// Server status changed (maybe already being cleaned up)
+			s.logger.Debug("server no longer in expired state, skipping",
+				zap.String("server_id", serverID),
+			)
+			continue
+		}
+
+		// Step 2: Delete PVC from K8s
 		if err := s.k8sClient.DeletePVC(ctx, s.config.Namespace, pvcName); err != nil {
-			s.logger.Error("failed to delete PVC",
+			s.logger.Error("failed to delete PVC, reverting to expired",
 				zap.String("server_id", serverID),
 				zap.String("pvc_name", pvcName),
 				zap.Error(err),
 			)
+			// Revert to expired so we can retry next cycle
+			s.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusDeleting, models.ServerStatusExpired, "")
 			failureCount++
 			continue
 		}
@@ -115,12 +139,17 @@ func (s *Service) runCleanup(ctx context.Context) {
 			zap.String("pvc_name", pvcName),
 		)
 
-		// Hard delete server record from database
+		// Step 3: Transition to deleted
+		s.db.TransitionServerStatus(ctx, serverID,
+			models.ServerStatusDeleting, models.ServerStatusDeleted, "")
+
+		// Step 4: Hard delete server record from database
 		if err := s.db.HardDeleteServer(ctx, serverID); err != nil {
 			s.logger.Error("failed to hard delete server",
 				zap.String("server_id", serverID),
 				zap.Error(err),
 			)
+			// PVC is already deleted, but record remains - will be cleaned up eventually
 			failureCount++
 			continue
 		}

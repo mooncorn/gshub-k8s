@@ -1,35 +1,43 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/mooncorn/gshub/api/config"
 	"github.com/mooncorn/gshub/api/internal/api/middleware"
 	"github.com/mooncorn/gshub/api/internal/database"
 	"github.com/mooncorn/gshub/api/internal/models"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
+	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	stripeservice "github.com/mooncorn/gshub/api/internal/services/stripe"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
 
 type ServerHandler struct {
-	db            *database.DB
-	k8sClient     *k8s.Client
-	config        *config.Config
-	stripeService *stripeservice.Service
+	db               *database.DB
+	k8sClient        *k8s.Client
+	config           *config.Config
+	stripeService    *stripeservice.Service
+	portAllocService *portalloc.Service
 }
 
-func NewServerHandler(db *database.DB, k8sClient *k8s.Client, cfg *config.Config, stripeSvc *stripeservice.Service) *ServerHandler {
+func NewServerHandler(db *database.DB, k8sClient *k8s.Client, cfg *config.Config, stripeSvc *stripeservice.Service, portAllocSvc *portalloc.Service) *ServerHandler {
 	return &ServerHandler{
-		db:            db,
-		k8sClient:     k8sClient,
-		config:        cfg,
-		stripeService: stripeSvc,
+		db:               db,
+		k8sClient:        k8sClient,
+		config:           cfg,
+		stripeService:    stripeSvc,
+		portAllocService: portAllocSvc,
 	}
 }
 
@@ -214,9 +222,12 @@ func (h *ServerHandler) GetServer(c *gin.Context) {
 		return
 	}
 
-	// Try to get K8s GameServer status if server is running
+	// Try to get K8s GameServer status if server is in an active state
 	var k8sState *string
-	if server.Status == models.ServerStatusRunning || server.Status == models.ServerStatusPending {
+	if server.Status == models.ServerStatusRunning ||
+		server.Status == models.ServerStatusPending ||
+		server.Status == models.ServerStatusStarting ||
+		server.Status == models.ServerStatusStopping {
 		gsName := "server-" + serverID
 		gs, err := h.k8sClient.GetGameServer(c.Request.Context(), h.config.K8sNamespace, gsName)
 		if err == nil && gs != nil {
@@ -265,30 +276,34 @@ func (h *ServerHandler) StopServer(c *gin.Context) {
 		return
 	}
 
-	// Check if server can be stopped
-	if server.Status != models.ServerStatusRunning && server.Status != models.ServerStatusPending {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "server is not running"})
-		return
-	}
-
-	// Delete GameServer from K8s
-	gsName := "server-" + serverID
-	err = h.k8sClient.DeleteGameServer(c.Request.Context(), h.config.K8sNamespace, gsName)
+	// STEP 1: Atomically transition to "stopping"
+	// This prevents race conditions with concurrent stops or start-after-stop
+	transitioned, err := h.db.TransitionServerStatusFrom(
+		c.Request.Context(), serverID,
+		[]models.ServerStatus{models.ServerStatusRunning, models.ServerStatusPending, models.ServerStatusStarting},
+		models.ServerStatusStopping,
+		"Stopping server...",
+	)
 	if err != nil {
-		log.Printf("failed to delete GameServer: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to stop server"})
+		log.Printf("failed to transition to stopping: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !transitioned {
+		// Server not in stoppable state - check if already stopping
+		if server.Status == models.ServerStatusStopping {
+			c.JSON(http.StatusAccepted, gin.H{"status": "stopping", "message": "stop already in progress"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server cannot be stopped from current state"})
 		return
 	}
 
-	// Mark server as stopped in database
-	err = h.db.MarkServerStopped(c.Request.Context(), serverID)
-	if err != nil {
-		log.Printf("failed to mark server stopped: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update server status"})
-		return
-	}
+	// STEP 2: Fire-and-forget: trigger K8s deletion immediately
+	// Reconciler will confirm completion and transition to stopped
+	go h.triggerServerStop(serverID)
 
-	c.JSON(http.StatusOK, gin.H{"status": "stopped", "message": "server stopped successfully"})
+	c.JSON(http.StatusAccepted, gin.H{"status": "stopping", "message": "server is stopping"})
 }
 
 // StartServer starts a stopped game server by setting status to pending
@@ -325,21 +340,166 @@ func (h *ServerHandler) StartServer(c *gin.Context) {
 		return
 	}
 
-	// Check if server can be started
-	if server.Status != models.ServerStatusStopped && server.Status != models.ServerStatusFailed {
+	// Atomically transition to pending (only from stopped/failed)
+	transitioned, err := h.db.TransitionServerStatusFrom(
+		c.Request.Context(), serverID,
+		[]models.ServerStatus{models.ServerStatusStopped, models.ServerStatusFailed},
+		models.ServerStatusPending,
+		"Starting server...",
+	)
+	if err != nil {
+		log.Printf("failed to transition to pending: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !transitioned {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "server cannot be started from current state"})
 		return
 	}
 
-	// Set status to pending so reconciler will pick it up
-	err = h.db.UpdateServerStatus(c.Request.Context(), serverID, string(models.ServerStatusPending), "")
+	// Fire-and-forget: trigger K8s resource creation immediately
+	// Reconciler will handle status transitions and retries if this fails
+	go h.triggerServerStart(server)
+
+	c.JSON(http.StatusAccepted, gin.H{"status": "starting", "message": "server is starting"})
+}
+
+// triggerServerStart attempts to create K8s resources for a server immediately.
+// If it fails, the server remains in "pending" status and the reconciler will retry.
+func (h *ServerHandler) triggerServerStart(server *models.Server) {
+	ctx := context.Background()
+	serverID := server.ID.String()
+
+	// Load game catalog
+	catalog, err := h.k8sClient.LoadGameCatalog(ctx, h.config.K8sNamespace, h.config.K8sGameCatalogName)
 	if err != nil {
-		log.Printf("failed to update server status: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start server"})
+		log.Printf("triggerServerStart: failed to load game catalog for server %s: %v", serverID, err)
+		return // Reconciler will retry
+	}
+
+	// Get game configuration
+	gameConfig, err := catalog.GetGameConfig(string(server.Game))
+	if err != nil {
+		log.Printf("triggerServerStart: invalid game config for server %s: %v", serverID, err)
+		return // Reconciler will handle and mark as failed
+	}
+
+	// Get plan configuration
+	planConfig, err := gameConfig.GetPlanConfig(string(server.Plan))
+	if err != nil {
+		log.Printf("triggerServerStart: invalid plan config for server %s: %v", serverID, err)
+		return // Reconciler will handle and mark as failed
+	}
+
+	// Check if ports already allocated
+	allocations, err := h.portAllocService.GetServerPorts(ctx, server.ID)
+	if err != nil {
+		log.Printf("triggerServerStart: failed to check port allocations for server %s: %v", serverID, err)
+		return // Reconciler will retry
+	}
+
+	// Allocate ports if needed
+	if len(allocations) == 0 {
+		portReqs := make([]portalloc.PortRequirement, len(gameConfig.Ports))
+		for i, p := range gameConfig.Ports {
+			portReqs[i] = portalloc.PortRequirement{
+				Name:     p.Name,
+				Protocol: p.Protocol,
+			}
+		}
+
+		// Add sidecar overhead: 100m CPU + 128Mi memory
+		cpuQty := resource.MustParse(planConfig.CPU)
+		memQty := resource.MustParse(planConfig.Memory)
+		cpuMillicores := int(cpuQty.MilliValue()) + 100
+		memBytes := memQty.Value() + 128*1024*1024
+
+		resourceReq := &portalloc.ResourceRequirement{
+			CPUMillicores: cpuMillicores,
+			MemoryBytes:   memBytes,
+		}
+
+		allocations, err = h.portAllocService.AllocatePorts(ctx, server.ID, portReqs, resourceReq)
+		if err != nil {
+			log.Printf("triggerServerStart: failed to allocate ports for server %s: %v", serverID, err)
+			return // Reconciler will handle and mark as failed
+		}
+		log.Printf("triggerServerStart: allocated ports for server %s on node %s", serverID, allocations[0].NodeName)
+	}
+
+	// Create PVC if it doesn't exist
+	pvcName := fmt.Sprintf("server-%s", serverID)
+	labels := map[string]string{"server": serverID, "game": string(server.Game)}
+
+	if err := h.k8sClient.CreatePVC(ctx, h.config.K8sNamespace, pvcName, planConfig.Storage, labels); err != nil {
+		log.Printf("triggerServerStart: failed to create PVC for server %s: %v", serverID, err)
+		// Continue - may already exist, reconciler will handle
+	}
+
+	// Build static port configs from allocations
+	gsName := fmt.Sprintf("server-%s", serverID)
+	nodeName := allocations[0].NodeName
+
+	staticPorts := make([]k8s.StaticPortConfig, len(allocations))
+	for i, alloc := range allocations {
+		var containerPort int32
+		for _, p := range gameConfig.Ports {
+			if p.Name == alloc.PortName {
+				containerPort = p.Port
+				break
+			}
+		}
+		staticPorts[i] = k8s.StaticPortConfig{
+			Name:          alloc.PortName,
+			ContainerPort: containerPort,
+			HostPort:      int32(alloc.Port),
+			Protocol:      corev1.Protocol(alloc.Protocol),
+		}
+	}
+
+	// Convert volume configs
+	var volumes []k8s.VolumeConfig
+	for _, vol := range gameConfig.Volumes {
+		volumes = append(volumes, k8s.VolumeConfig{
+			Name:      vol.Name,
+			MountPath: vol.MountPath,
+			SubPath:   vol.SubPath,
+		})
+	}
+
+	// Create GameServer
+	if err := h.k8sClient.CreateGameServerWithStaticPorts(ctx, h.config.K8sNamespace, gsName, gameConfig.Image,
+		nodeName, staticPorts, volumes, gameConfig.Env, planConfig.CPU, planConfig.Memory,
+		pvcName, labels, gameConfig.HealthCheck); err != nil {
+		log.Printf("triggerServerStart: failed to create GameServer for server %s: %v", serverID, err)
+		return // Reconciler will retry
+	}
+
+	// Transition to starting - reconciler will handle the Ready check
+	transitioned, err := h.db.TransitionServerStatus(ctx, serverID,
+		models.ServerStatusPending, models.ServerStatusStarting, "Creating game server...")
+	if err != nil {
+		log.Printf("triggerServerStart: failed to transition to starting for server %s: %v", serverID, err)
+		return
+	}
+	if transitioned {
+		log.Printf("triggerServerStart: server %s transitioned to starting", serverID)
+	}
+}
+
+// triggerServerStop attempts to delete K8s resources for a server immediately.
+// If it fails, the reconciler will retry the deletion.
+func (h *ServerHandler) triggerServerStop(serverID string) {
+	ctx := context.Background()
+	gsName := "server-" + serverID
+
+	if err := h.k8sClient.DeleteGameServer(ctx, h.config.K8sNamespace, gsName); err != nil {
+		log.Printf("triggerServerStop: failed to delete GameServer for server %s: %v", serverID, err)
+		// Reconciler will retry
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "starting", "message": "server is starting"})
+	log.Printf("triggerServerStop: deleted GameServer for server %s", serverID)
 }
 
 // HandleStripeWebhook handles Stripe webhook events with proper error handling and deduplication

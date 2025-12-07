@@ -301,6 +301,40 @@ func (db *DB) UpdateServerStatus(ctx context.Context, id, status, message string
 	return nil
 }
 
+// TransitionServerStatus atomically transitions status only if current matches expected.
+// Returns (true, nil) if transitioned, (false, nil) if status didn't match, (false, error) on DB error.
+func (db *DB) TransitionServerStatus(ctx context.Context, id string, fromStatus, toStatus models.ServerStatus, message string) (bool, error) {
+	query := `
+		UPDATE servers
+		SET status = $2, status_message = $3, updated_at = NOW()
+		WHERE id = $1 AND status = $4
+	`
+	result, err := db.Pool.Exec(ctx, query, id, string(toStatus), message, string(fromStatus))
+	if err != nil {
+		return false, fmt.Errorf("failed to transition status: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+// TransitionServerStatusFrom transitions from any of the given statuses.
+// Returns (true, nil) if transitioned, (false, nil) if status didn't match, (false, error) on DB error.
+func (db *DB) TransitionServerStatusFrom(ctx context.Context, id string, fromStatuses []models.ServerStatus, toStatus models.ServerStatus, message string) (bool, error) {
+	statusStrings := make([]string, len(fromStatuses))
+	for i, s := range fromStatuses {
+		statusStrings[i] = string(s)
+	}
+	query := `
+		UPDATE servers
+		SET status = $2, status_message = $3, updated_at = NOW()
+		WHERE id = $1 AND status = ANY($4)
+	`
+	result, err := db.Pool.Exec(ctx, query, id, string(toStatus), message, statusStrings)
+	if err != nil {
+		return false, fmt.Errorf("failed to transition status: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
 // UpdateServerInfo updates IP and port (used by reconciler)
 func (db *DB) UpdateServerInfo(ctx context.Context, id, nodeIP string) error {
 	query := `

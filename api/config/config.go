@@ -83,7 +83,7 @@ func Load() (*Config, error) {
 
 		Port:           getEnv("PORT", "8080"),
 		GinMode:        getEnv("GIN_MODE", "debug"),
-		AllowedOrigins: getEnvSlice("ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
+		AllowedOrigins: getEnvSlice("ALLOWED_ORIGINS", []string{"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"}),
 
 		DatabaseURL: databaseURL,
 
@@ -99,7 +99,7 @@ func Load() (*Config, error) {
 		StripeWebhookSecret: getEnv("STRIPE_WEBHOOK_SECRET", ""),
 		StripePrices:        stripePrices,
 
-		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:3000"),
+		FrontendURL: getEnv("FRONTEND_URL", "http://localhost:5173"),
 
 		K8sNamespace:       getEnv("K8S_NAMESPACE", "gshub"),
 		K8sGameCatalogName: getEnv("K8S_GAME_CATALOG_NAME", "game-catalog"),

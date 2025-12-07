@@ -71,11 +71,120 @@ func (r *ServerReconciler) loop(ctx context.Context) {
 	}
 }
 
-// reconcile processes all pending servers
+// reconcile processes servers in transitional states
 func (r *ServerReconciler) reconcile(ctx context.Context) {
 	startTime := time.Now()
 
-	// Get all servers with pending status
+	// 1. Handle "stopping" servers - confirm K8s delete completed
+	r.reconcileStoppingServers(ctx)
+
+	// 2. Handle "starting" servers - check if pod is ready
+	r.reconcileStartingServers(ctx)
+
+	// 3. Handle "pending" servers - create K8s resources
+	r.reconcilePendingServers(ctx)
+
+	r.logger.Debug("reconciliation cycle complete", zap.Duration("duration", time.Since(startTime)))
+}
+
+// reconcileStoppingServers handles servers in "stopping" state - waits for K8s deletion
+func (r *ServerReconciler) reconcileStoppingServers(ctx context.Context) {
+	servers, err := r.db.GetServersByStatus(ctx, string(models.ServerStatusStopping))
+	if err != nil {
+		r.logger.Error("failed to get stopping servers", zap.Error(err))
+		return
+	}
+
+	for _, server := range servers {
+		serverID := server.ID.String()
+		gsName := fmt.Sprintf("server-%s", serverID)
+
+		gs, err := r.k8sClient.GetGameServer(ctx, r.k8sNamespace, gsName)
+		if err != nil && errors.IsNotFound(err) {
+			// GameServer deleted - complete transition to stopped
+			if ok, _ := r.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusStopping, models.ServerStatusStopped, ""); ok {
+				r.logger.Info("server stopped", zap.String("server_id", serverID))
+				if err := r.db.MarkServerStopped(ctx, serverID); err != nil {
+					r.logger.Error("failed to set stopped_at timestamp", zap.String("server_id", serverID), zap.Error(err))
+				}
+			}
+			continue
+		}
+
+		// Check if terminating (DeletionTimestamp set)
+		if gs != nil && gs.ObjectMeta.DeletionTimestamp != nil {
+			r.logger.Debug("GameServer terminating, waiting...", zap.String("server_id", serverID))
+			continue
+		}
+
+		// GameServer exists but not terminating - re-issue delete
+		if gs != nil {
+			r.logger.Warn("re-issuing GameServer delete", zap.String("server_id", serverID))
+			_ = r.k8sClient.DeleteGameServer(ctx, r.k8sNamespace, gsName)
+		}
+	}
+}
+
+// reconcileStartingServers handles servers in "starting" state - waits for pod to be Ready
+func (r *ServerReconciler) reconcileStartingServers(ctx context.Context) {
+	servers, err := r.db.GetServersByStatus(ctx, string(models.ServerStatusStarting))
+	if err != nil {
+		r.logger.Error("failed to get starting servers", zap.Error(err))
+		return
+	}
+
+	for _, server := range servers {
+		serverID := server.ID.String()
+		gsName := fmt.Sprintf("server-%s", serverID)
+
+		// Check timeout (5 minutes)
+		if time.Since(server.UpdatedAt) > 5*time.Minute {
+			r.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusStarting, models.ServerStatusFailed,
+				"Timeout waiting for pod to be ready")
+			r.logger.Warn("server startup timed out", zap.String("server_id", serverID))
+			continue
+		}
+
+		gs, err := r.k8sClient.GetGameServer(ctx, r.k8sNamespace, gsName)
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				r.logger.Error("failed to get GameServer", zap.String("server_id", serverID), zap.Error(err))
+			}
+			continue
+		}
+
+		// Check if terminating (subscription may have been deleted)
+		if gs.ObjectMeta.DeletionTimestamp != nil {
+			r.logger.Debug("GameServer terminating during startup", zap.String("server_id", serverID))
+			continue
+		}
+
+		if gs.Status.State == "Ready" {
+			// Get node IP from allocations
+			allocations, err := r.portAllocService.GetServerPorts(ctx, server.ID)
+			nodeIP := ""
+			if err == nil && len(allocations) > 0 {
+				nodeIP = allocations[0].NodeIP
+			}
+
+			if ok, _ := r.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusStarting, models.ServerStatusRunning, ""); ok {
+				if nodeIP != "" {
+					r.db.UpdateServerNodeIP(ctx, serverID, nodeIP)
+				}
+				if gs.Status.Address != "" {
+					r.db.UpdateServerPodIP(ctx, serverID, gs.Status.Address)
+				}
+				r.logger.Info("server running", zap.String("server_id", serverID))
+			}
+		}
+	}
+}
+
+// reconcilePendingServers handles servers in "pending" state - creates K8s resources
+func (r *ServerReconciler) reconcilePendingServers(ctx context.Context) {
 	pendingServers, err := r.db.GetServersByStatus(ctx, string(models.ServerStatusPending))
 	if err != nil {
 		r.logger.Error("failed to get pending servers", zap.Error(err))
@@ -86,7 +195,7 @@ func (r *ServerReconciler) reconcile(ctx context.Context) {
 		return
 	}
 
-	r.logger.Debug("reconciling servers", zap.Int("count", len(pendingServers)))
+	r.logger.Debug("reconciling pending servers", zap.Int("count", len(pendingServers)))
 
 	// Load game catalog once
 	catalog, err := r.k8sClient.LoadGameCatalog(ctx, r.k8sNamespace, r.k8sGameCatalogName)
@@ -110,12 +219,12 @@ func (r *ServerReconciler) reconcile(ctx context.Context) {
 		}
 	}
 
-	duration := time.Since(startTime)
-	r.logger.Info("reconciliation cycle complete",
-		zap.Int("processed", len(pendingServers)),
-		zap.Int("succeeded", successCount),
-		zap.Int("failed", failureCount),
-		zap.Duration("duration", duration))
+	if successCount > 0 || failureCount > 0 {
+		r.logger.Info("pending servers reconciled",
+			zap.Int("processed", len(pendingServers)),
+			zap.Int("succeeded", successCount),
+			zap.Int("failed", failureCount))
+	}
 }
 
 // reconcileServer processes a single pending server
@@ -193,7 +302,6 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 	// STEP 3: Create GameServer with static ports pinned to the allocated node
 	gsName := fmt.Sprintf("server-%s", serverID)
 	nodeName := allocations[0].NodeName
-	nodeIP := allocations[0].NodeIP
 
 	// Build static port configs from allocations
 	staticPorts := make([]k8s.StaticPortConfig, len(allocations))
@@ -232,51 +340,22 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// STEP 4: Check if GameServer is ready
-	gs, err := r.k8sClient.GetGameServer(ctx, r.k8sNamespace, gsName)
+	// STEP 4: Transition to "starting" - reconcileStartingServers will handle the Ready check
+	transitioned, err := r.db.TransitionServerStatus(ctx, serverID,
+		models.ServerStatusPending, models.ServerStatusStarting, "Creating game server...")
 	if err != nil {
-		if !errors.IsNotFound(err) {
-			r.logger.Debug("GameServer not yet created", zap.String("server_id", serverID))
-		} else {
-			r.logger.Error("failed to get GameServer", zap.String("server_id", serverID), zap.Error(err))
-		}
-		return r.db.UpdateServerLastReconciled(ctx, serverID)
-	}
-
-	// Check if pod is ready
-	if gs.Status.State != "Ready" {
-		r.logger.Debug("pod not ready", zap.String("server_id", serverID), zap.String("state", string(gs.Status.State)))
-		return r.db.UpdateServerLastReconciled(ctx, serverID)
-	}
-
-	// STEP 5: Update server status to running (ports already known from allocation)
-	if err := r.db.UpdateServerToRunning(ctx, serverID, nodeIP); err != nil {
-		r.logger.Error("failed to update server status",
-			zap.String("server_id", serverID), zap.Error(err))
+		r.logger.Error("failed to transition to starting", zap.String("server_id", serverID), zap.Error(err))
 		return err
 	}
-
-	// Update node IP field
-	if err := r.db.UpdateServerNodeIP(ctx, serverID, nodeIP); err != nil {
-		r.logger.Error("failed to update node IP",
-			zap.String("server_id", serverID), zap.Error(err))
-		return err
+	if !transitioned {
+		// Status changed (maybe to stopping/expired) - don't continue
+		r.logger.Debug("server status changed, skipping", zap.String("server_id", serverID))
+		return nil
 	}
 
-	// Update pod IP (internal K8s IP) if available
-	if gs.Status.Address != "" {
-		if err := r.db.UpdateServerPodIP(ctx, serverID, gs.Status.Address); err != nil {
-			r.logger.Error("failed to update pod IP",
-				zap.String("server_id", serverID), zap.Error(err))
-			// Non-fatal, continue
-		}
-	}
-
-	r.logger.Info("server reconciled successfully",
+	r.logger.Info("server transitioning to starting",
 		zap.String("server_id", serverID),
 		zap.String("node", nodeName),
-		zap.String("node_ip", nodeIP),
-		zap.String("pod_address", gs.Status.Address),
 		zap.Int("port_count", len(allocations)))
 
 	return nil
