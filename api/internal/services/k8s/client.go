@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
@@ -522,4 +523,23 @@ func (c *Client) WaitForGameServerReady(ctx context.Context, namespace, name str
 		// Wait before next check
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// StreamPodLogs returns a streaming io.ReadCloser for real-time log following.
+// The stream includes the last `tailLines` of historical logs followed by new logs.
+// The caller is responsible for closing the returned stream.
+func (c *Client) StreamPodLogs(ctx context.Context, namespace, podName, containerName string, tailLines int64) (io.ReadCloser, error) {
+	opts := &corev1.PodLogOptions{
+		Container: containerName,
+		Follow:    true,
+		TailLines: &tailLines,
+	}
+
+	req := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream pod logs: %w", err)
+	}
+
+	return stream, nil
 }

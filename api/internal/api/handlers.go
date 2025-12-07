@@ -72,6 +72,7 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 		// Server management
 		protected.GET("/servers", h.ServerHandler.ListServers)
 		protected.GET("/servers/:id", h.ServerHandler.GetServer)
+		protected.GET("/servers/:id/logs", h.ServerHandler.StreamLogs)
 		protected.POST("/servers/:id/stop", h.ServerHandler.StopServer)
 		protected.POST("/servers/:id/start", h.ServerHandler.StartServer)
 		protected.POST("/servers/checkout", h.ServerHandler.CreateCheckoutSession)

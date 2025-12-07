@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -578,4 +580,131 @@ func (h *ServerHandler) HandleStripeWebhook(c *gin.Context) {
 
 	log.Printf("webhook_processed event_id=%s event_type=%s status=success", event.ID, event.Type)
 	c.JSON(http.StatusOK, gin.H{"status": "received"})
+}
+
+// StreamLogs streams real-time logs from a game server via SSE
+func (h *ServerHandler) StreamLogs(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	// Verify server ownership
+	server, err := h.db.GetServerByID(c.Request.Context(), serverID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Check server is in a state where logs are available
+	if server.Status != models.ServerStatusRunning &&
+		server.Status != models.ServerStatusStarting &&
+		server.Status != models.ServerStatusStopping {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "logs not available",
+			"reason": fmt.Sprintf("server is %s", server.Status),
+		})
+		return
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	// Create context that cancels when client disconnects
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	// Start log streaming from K8s
+	podName := "server-" + serverID
+	const tailLines int64 = 50
+	const containerName = "game"
+
+	logStream, err := h.k8sClient.StreamPodLogs(ctx, h.config.K8sNamespace, podName, containerName, tailLines)
+	if err != nil {
+		log.Printf("failed to stream logs for server %s: %v", serverID, err)
+		c.SSEvent("error", gin.H{
+			"message": "Failed to connect to server logs",
+			"details": err.Error(),
+		})
+		c.Writer.Flush()
+		return
+	}
+	defer logStream.Close()
+
+	// Send initial connection success event
+	c.SSEvent("connected", gin.H{
+		"server_id": serverID,
+		"status":    "streaming",
+	})
+	c.Writer.Flush()
+
+	// Start heartbeat goroutine to prevent proxy timeouts
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				close(heartbeatDone)
+				return
+			case <-ticker.C:
+				c.SSEvent("heartbeat", gin.H{"timestamp": time.Now().UTC().Format(time.RFC3339)})
+				c.Writer.Flush()
+			}
+		}
+	}()
+
+	// Stream logs line by line
+	scanner := bufio.NewScanner(logStream)
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			log.Printf("log streaming ended for server %s: client disconnected", serverID)
+			return
+		default:
+			line := scanner.Text()
+			c.SSEvent("log", gin.H{
+				"line":      line,
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+			})
+			c.Writer.Flush()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("log streaming error for server %s: %v", serverID, err)
+		c.SSEvent("error", gin.H{
+			"message": "Log stream interrupted",
+			"details": err.Error(),
+		})
+		c.Writer.Flush()
+	}
+
+	// Send end event when stream closes
+	c.SSEvent("end", gin.H{
+		"message": "Log stream ended",
+	})
+	c.Writer.Flush()
 }

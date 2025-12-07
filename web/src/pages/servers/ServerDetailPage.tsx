@@ -1,6 +1,8 @@
 import { useParams, Link } from "react-router-dom"
+import { useRef, useEffect } from "react"
 import { useServer } from "@/hooks/useServer"
 import { useStartServer, useStopServer } from "@/hooks/useServerActions"
+import { useServerLogs } from "@/hooks/useServerLogs"
 import { ServerStatusBadge } from "@/components/servers/ServerStatusBadge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -13,6 +15,23 @@ export function ServerDetailPage() {
   const { data, isLoading, error } = useServer(id!)
   const startServer = useStartServer()
   const stopServer = useStopServer()
+
+  // Log streaming - only enabled when server is in a loggable state
+  const server = data?.server
+  const showLogs =
+    server?.status === "running" ||
+    server?.status === "starting" ||
+    server?.status === "stopping"
+  const { logs, isConnected, error: logError, clearLogs } = useServerLogs(
+    id,
+    showLogs
+  )
+
+  // Auto-scroll logs to bottom
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [logs])
 
   if (isLoading) {
     return (
@@ -50,20 +69,20 @@ export function ServerDetailPage() {
     )
   }
 
-  const { server, k8s_state } = data
-  const game = GAMES[server.game]
-  const plan = PLANS[server.plan]
+  const { server: serverData, k8s_state } = data
+  const game = GAMES[serverData.game]
+  const plan = PLANS[serverData.plan]
 
-  const canStart = server.status === "stopped" || server.status === "failed"
+  const canStart = serverData.status === "stopped" || serverData.status === "failed"
   const canStop =
-    server.status === "running" ||
-    server.status === "starting" ||
-    server.status === "pending"
+    serverData.status === "running" ||
+    serverData.status === "starting" ||
+    serverData.status === "pending"
 
-  const gamePort = server.ports?.find((p) => p.name === "game")
+  const gamePort = serverData.ports?.find((p) => p.name === "game")
   const connectionAddress =
-    server.node_ip && gamePort?.host_port
-      ? `${server.node_ip}:${gamePort.host_port}`
+    serverData.node_ip && gamePort?.host_port
+      ? `${serverData.node_ip}:${gamePort.host_port}`
       : null
 
   return (
@@ -78,12 +97,12 @@ export function ServerDetailPage() {
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold">{server.display_name}</h1>
+          <h1 className="text-xl font-semibold">{serverData.display_name}</h1>
           <p className="text-sm text-muted-foreground">
-            {game?.name || server.game} • {plan?.name || server.plan}
+            {game?.name || serverData.game} • {plan?.name || serverData.plan}
           </p>
         </div>
-        <ServerStatusBadge status={server.status} />
+        <ServerStatusBadge status={serverData.status} />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -97,7 +116,7 @@ export function ServerDetailPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm">Server Status</span>
-                <ServerStatusBadge status={server.status} />
+                <ServerStatusBadge status={serverData.status} />
               </div>
               {k8s_state && (
                 <div className="flex items-center justify-between">
@@ -107,10 +126,10 @@ export function ServerDetailPage() {
                   </span>
                 </div>
               )}
-              {server.status_message && (
+              {serverData.status_message && (
                 <div className="pt-2">
                   <span className="text-xs text-muted-foreground">
-                    {server.status_message}
+                    {serverData.status_message}
                   </span>
                 </div>
               )}
@@ -140,7 +159,7 @@ export function ServerDetailPage() {
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">
-                {server.status === "running"
+                {serverData.status === "running"
                   ? "Waiting for connection info..."
                   : "Start the server to get connection info"}
               </p>
@@ -162,7 +181,7 @@ export function ServerDetailPage() {
             {canStart && (
               <Button
                 size="sm"
-                onClick={() => startServer.mutate(server.id)}
+                onClick={() => startServer.mutate(serverData.id)}
                 disabled={startServer.isPending}
               >
                 {startServer.isPending ? "Starting..." : "Start"}
@@ -172,7 +191,7 @@ export function ServerDetailPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => stopServer.mutate(server.id)}
+                onClick={() => stopServer.mutate(serverData.id)}
                 disabled={stopServer.isPending}
               >
                 {stopServer.isPending ? "Stopping..." : "Stop"}
@@ -181,6 +200,45 @@ export function ServerDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {showLogs && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Server Logs
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              {isConnected && (
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <span className="h-2 w-2 rounded-full bg-green-500" />
+                  Live
+                </span>
+              )}
+              <Button variant="ghost" size="sm" onClick={clearLogs}>
+                Clear
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="h-64 overflow-auto rounded bg-zinc-950 p-3 font-mono text-xs">
+              {logs.length === 0 && !logError && (
+                <p className="text-zinc-500">
+                  {isConnected ? "Waiting for logs..." : "Connecting..."}
+                </p>
+              )}
+              {logError && (
+                <p className="text-red-400">Error: {logError}</p>
+              )}
+              {logs.map((log, i) => (
+                <div key={i} className="whitespace-pre-wrap text-zinc-300">
+                  {log.line}
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }
