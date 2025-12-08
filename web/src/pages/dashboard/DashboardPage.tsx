@@ -58,7 +58,7 @@ export function DashboardPage() {
       )}
 
       {!isLoading && !error && servers && servers.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 ">
           {servers.map((server) => (
             <ServerCard key={server.id} server={server} />
           ))}

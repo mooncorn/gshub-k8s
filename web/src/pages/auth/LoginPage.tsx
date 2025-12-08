@@ -86,7 +86,11 @@ export function LoginPage() {
 
           <div className="text-center text-sm text-muted-foreground">
             Don't have an account?{" "}
-            <Link to="/register" className="hover:text-foreground underline">
+            <Link
+              to="/register"
+              state={{ from: location.state?.from }}
+              className="hover:text-foreground underline"
+            >
               Sign up
             </Link>
           </div>

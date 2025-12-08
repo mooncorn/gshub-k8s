@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useNavigate, useLocation } from "react-router-dom"
 import { useAuth } from "@/hooks/useAuth"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -11,11 +11,13 @@ export function RegisterPage() {
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [error, setError] = useState("")
-  const [success, setSuccess] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
 
   const { register } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+
+  const from = location.state?.from?.pathname || "/"
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -35,7 +37,8 @@ export function RegisterPage() {
 
     try {
       await register(email, password)
-      setSuccess(true)
+      // Registration auto-logs in, navigate to intended destination
+      navigate(from, { replace: true })
     } catch (err) {
       if (err instanceof Error && "response" in err) {
         const axiosError = err as { response?: { status: number } }
@@ -50,29 +53,6 @@ export function RegisterPage() {
     } finally {
       setIsLoading(false)
     }
-  }
-
-  if (success) {
-    return (
-      <Card>
-        <CardHeader className="space-y-1">
-          <CardTitle className="text-xl">Check your email</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            We've sent a verification link to <strong>{email}</strong>. Please
-            check your inbox and click the link to verify your account.
-          </p>
-          <Button
-            variant="outline"
-            className="w-full"
-            onClick={() => navigate("/login")}
-          >
-            Back to sign in
-          </Button>
-        </CardContent>
-      </Card>
-    )
   }
 
   return (
@@ -130,7 +110,11 @@ export function RegisterPage() {
 
           <div className="text-center text-sm text-muted-foreground">
             Already have an account?{" "}
-            <Link to="/login" className="hover:text-foreground underline">
+            <Link
+              to="/login"
+              state={{ from: location.state?.from }}
+              className="hover:text-foreground underline"
+            >
               Sign in
             </Link>
           </div>

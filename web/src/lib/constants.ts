@@ -1,5 +1,15 @@
 import type { GameType, ServerPlan } from "@/api/servers"
 
+export const HERO_IMAGES: Record<GameType, string> = {
+  minecraft: "/img/minecraft_hero.webp",
+  valheim: "/img/valheim_hero.png",
+}
+
+export const GAME_ICONS: Record<GameType, string> = {
+  minecraft: "/img/minecraft_icon.png",
+  valheim: "/img/valheim_icon.ico",
+}
+
 export const GAMES: Record<
   GameType,
   {
@@ -28,23 +38,35 @@ export const PLANS: Record<
   {
     id: ServerPlan
     name: string
-    description: string
+    players: string
+    cpu: string
+    memory: string
+    price: string
   }
 > = {
   small: {
     id: "small",
     name: "Small",
-    description: "Perfect for small groups (2-5 players)",
+    players: "2-5",
+    cpu: "1 vCPU",
+    memory: "2 GB",
+    price: "$5/mo",
   },
   medium: {
     id: "medium",
     name: "Medium",
-    description: "Great for communities (5-15 players)",
+    players: "5-15",
+    cpu: "2 vCPU",
+    memory: "4 GB",
+    price: "$10/mo",
   },
   large: {
     id: "large",
     name: "Large",
-    description: "For large servers (15+ players)",
+    players: "15+",
+    cpu: "4 vCPU",
+    memory: "8 GB",
+    price: "$20/mo",
   },
 }
 

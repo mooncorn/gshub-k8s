@@ -2,7 +2,7 @@ import { Badge } from "@/components/ui/badge"
 import type { ServerStatus } from "@/api/servers"
 import { cn } from "@/lib/utils"
 
-const statusConfig: Record<ServerStatus, { label: string; className: string }> =
+export const statusConfig: Record<ServerStatus, { label: string; className: string }> =
   {
     pending: {
       label: "Pending",

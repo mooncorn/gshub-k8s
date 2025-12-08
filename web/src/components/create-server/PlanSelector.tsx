@@ -29,7 +29,7 @@ export function PlanSelector({ game, selected, onSelect }: PlanSelectorProps) {
             <CardContent className="p-4">
               <h3 className="font-medium">{plan.name}</h3>
               <p className="text-sm text-muted-foreground">
-                {plan.description}
+                {plan.players} players
               </p>
             </CardContent>
           </Card>
