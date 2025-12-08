@@ -17,6 +17,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// ResourceOverheadFactor is the multiplier applied to resource requests
+// to reserve capacity for system overhead (kubelet, containerd, OS)
+const ResourceOverheadFactor = 0.90 // 10% reserved for system
+
 // PortConfig defines a port for GameServer (dynamic allocation)
 type PortConfig struct {
 	Name          string
@@ -339,6 +343,12 @@ func (c *Client) CreateGameServerWithStaticPorts(
 		},
 	}
 
+	// Apply overhead factor to resource requests (reserve capacity for system)
+	cpuQty := resource.MustParse(cpuRequest)
+	memQty := resource.MustParse(memoryRequest)
+	adjustedCPU := resource.NewMilliQuantity(int64(float64(cpuQty.MilliValue())*ResourceOverheadFactor), resource.DecimalSI)
+	adjustedMemory := resource.NewQuantity(int64(float64(memQty.Value())*ResourceOverheadFactor), resource.BinarySI)
+
 	// Build containers slice with game server and optional sidecar
 	containers := []corev1.Container{
 		{
@@ -348,8 +358,8 @@ func (c *Client) CreateGameServerWithStaticPorts(
 			VolumeMounts: volumeMounts,
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse(cpuRequest),
-					corev1.ResourceMemory: resource.MustParse(memoryRequest),
+					corev1.ResourceCPU:    *adjustedCPU,
+					corev1.ResourceMemory: *adjustedMemory,
 				},
 			},
 		},

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mooncorn/gshub/api/internal/database"
+	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"go.uber.org/zap"
 )
 
@@ -57,12 +58,13 @@ func (s *Service) AllocatePorts(ctx context.Context, serverID uuid.UUID, require
 		}
 	}
 
-	// Convert resource requirement if provided
+	// Convert resource requirement if provided, applying overhead factor
+	// to reserve capacity for system processes (kubelet, containerd, OS)
 	var dbResourceReq *database.ResourceRequirement
 	if resourceReq != nil {
 		dbResourceReq = &database.ResourceRequirement{
-			CPUMillicores: resourceReq.CPUMillicores,
-			MemoryBytes:   resourceReq.MemoryBytes,
+			CPUMillicores: int(float64(resourceReq.CPUMillicores) * k8s.ResourceOverheadFactor),
+			MemoryBytes:   int64(float64(resourceReq.MemoryBytes) * k8s.ResourceOverheadFactor),
 		}
 	}
 

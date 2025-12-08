@@ -214,10 +214,21 @@ func (db *DB) AllocatePortsForServer(ctx context.Context, serverID uuid.UUID, re
 					   AND s.reserved_memory_bytes IS NOT NULL), 0
 				)
 			) >= $4
-			ORDER BY (
-				SELECT COUNT(*) FROM port_allocations pa
-				WHERE pa.node_id = n.id AND pa.server_id IS NULL
-			) DESC
+			-- Bin-packing: prefer nodes with LEAST remaining capacity after allocation (tightest fit)
+			ORDER BY LEAST(
+				n.allocatable_cpu_millicores - COALESCE(
+					(SELECT SUM(s.reserved_cpu_millicores) FROM servers s
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_cpu_millicores IS NOT NULL), 0
+				) - $3,
+				n.allocatable_memory_bytes - COALESCE(
+					(SELECT SUM(s.reserved_memory_bytes) FROM servers s
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_memory_bytes IS NOT NULL), 0
+				) - $4
+			) ASC
 			LIMIT 1
 			FOR UPDATE OF n
 		`
