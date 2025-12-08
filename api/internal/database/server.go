@@ -689,3 +689,28 @@ func (db *DB) UpdateServerEnvOverrides(ctx context.Context, id string, envOverri
 
 	return nil
 }
+
+// ReactivateServer reactivates an expired server with a new subscription
+func (db *DB) ReactivateServer(ctx context.Context, id string, subscriptionID string) error {
+	query := `
+		UPDATE servers
+		SET status = 'pending',
+		    stripe_subscription_id = $2,
+		    expired_at = NULL,
+		    delete_after = NULL,
+		    status_message = 'Reactivating server...',
+		    updated_at = NOW()
+		WHERE id = $1 AND status = 'expired'
+	`
+
+	result, err := db.Pool.Exec(ctx, query, id, subscriptionID)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate server: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("server not found or not in expired state")
+	}
+
+	return nil
+}

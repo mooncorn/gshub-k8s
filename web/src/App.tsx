@@ -14,6 +14,7 @@ import { ResetPasswordPage } from "@/pages/auth/ResetPasswordPage"
 import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage"
 import { DashboardPage } from "@/pages/dashboard/DashboardPage"
 import { CreateServerPage } from "@/pages/servers/CreateServerPage"
+import { BillingPage } from "@/pages/settings/BillingPage"
 import { ServerLayout } from "@/components/servers/ServerLayout"
 import { ServerDashboardTab } from "@/pages/servers/tabs/ServerDashboardTab"
 import { ServerConfigurationTab } from "@/pages/servers/tabs/ServerConfigurationTab"
@@ -47,6 +48,7 @@ function App() {
           <Route element={<ProtectedRoute />}>
             <Route element={<RootLayout />}>
               <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/billing" element={<BillingPage />} />
               <Route path="/servers/:id" element={<ServerLayout />}>
                 <Route index element={<ServerDashboardTab />} />
                 <Route path="configuration" element={<ServerConfigurationTab />} />

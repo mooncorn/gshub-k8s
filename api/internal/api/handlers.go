@@ -15,9 +15,10 @@ import (
 )
 
 type Handlers struct {
-	Config        *config.Config
-	AuthHandler   *AuthHandler
-	ServerHandler *ServerHandler
+	Config         *config.Config
+	AuthHandler    *AuthHandler
+	ServerHandler  *ServerHandler
+	BillingHandler *BillingHandler
 }
 
 func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, portAllocService *portalloc.Service, hub *broadcast.Hub) *Handlers {
@@ -26,9 +27,10 @@ func NewHandlers(db *database.DB, cfg *config.Config, k8sClient *k8s.Client, por
 	stripeService := stripe.NewService(db, cfg, k8sClient, portAllocService, cfg.K8sNamespace)
 
 	return &Handlers{
-		Config:        cfg,
-		AuthHandler:   NewAuthHandler(authService, emailService),
-		ServerHandler: NewServerHandler(db, k8sClient, cfg, stripeService, portAllocService, hub),
+		Config:         cfg,
+		AuthHandler:    NewAuthHandler(authService, emailService),
+		ServerHandler:  NewServerHandler(db, k8sClient, cfg, stripeService, portAllocService, hub),
+		BillingHandler: NewBillingHandler(db, cfg, stripeService),
 	}
 }
 
@@ -79,6 +81,12 @@ func (h *Handlers) RegisterRoutes(r *gin.Engine) {
 		protected.POST("/servers/:id/start", h.ServerHandler.StartServer)
 		protected.PUT("/servers/:id/env", h.ServerHandler.UpdateServerEnv)
 		protected.POST("/servers/checkout", h.ServerHandler.CreateCheckoutSession)
+
+		// Billing
+		protected.GET("/billing", h.BillingHandler.GetBilling)
+		protected.POST("/billing/servers/:id/cancel", h.BillingHandler.CancelSubscription)
+		protected.POST("/billing/servers/:id/resume", h.BillingHandler.ResumeSubscription)
+		protected.POST("/billing/servers/:id/resubscribe", h.BillingHandler.ResubscribeServer)
 	}
 
 	// Stripe webhook (public, signature verified)

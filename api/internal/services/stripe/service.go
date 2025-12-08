@@ -15,6 +15,7 @@ import (
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/stripe/stripe-go/v84"
 	"github.com/stripe/stripe-go/v84/checkout/session"
+	"github.com/stripe/stripe-go/v84/subscription"
 	"github.com/stripe/stripe-go/v84/webhook"
 )
 
@@ -150,6 +151,14 @@ func (s *Service) handleCheckoutSessionCompleted(ctx context.Context, event *str
 	}
 
 	log.Printf("Processing checkout session: event_id=%s session_id=%s", event.ID, sess.ID)
+
+	// Check if this is a resubscription
+	if resubscribeServerID, ok := sess.Metadata["resubscribe_server_id"]; ok {
+		log.Printf("Processing resubscription: event_id=%s server_id=%s", event.ID, resubscribeServerID)
+		return s.handleResubscribeCheckout(ctx, event.ID, &sess, resubscribeServerID)
+	}
+
+	// Handle new server creation
 	return s.CompleteCheckoutSession(ctx, event.ID, &sess)
 }
 
@@ -319,5 +328,91 @@ func (s *Service) CompleteCheckoutSession(ctx context.Context, eventID string, s
 	}
 
 	log.Printf("Server created successfully: event_id=%s server_id=%s pending_request_id=%s", eventID, createdServer.ID, pendingRequestID)
+	return nil
+}
+
+// GetSubscription retrieves subscription details from Stripe
+func (s *Service) GetSubscription(ctx context.Context, subscriptionID string) (*stripe.Subscription, error) {
+	sub, err := subscription.Get(subscriptionID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve subscription: %w", err)
+	}
+	return sub, nil
+}
+
+// CancelSubscriptionAtPeriodEnd cancels a subscription at the end of the billing period
+func (s *Service) CancelSubscriptionAtPeriodEnd(ctx context.Context, subscriptionID string) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(true),
+	}
+	sub, err := subscription.Update(subscriptionID, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cancel subscription: %w", err)
+	}
+	return sub, nil
+}
+
+// ResumeSubscription removes the cancel_at_period_end flag to resume a subscription
+func (s *Service) ResumeSubscription(ctx context.Context, subscriptionID string) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(false),
+	}
+	sub, err := subscription.Update(subscriptionID, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resume subscription: %w", err)
+	}
+	return sub, nil
+}
+
+// CreateResubscribeCheckoutSession creates a new checkout session for resubscribing an expired server
+func (s *Service) CreateResubscribeCheckoutSession(ctx context.Context, serverID uuid.UUID, userID uuid.UUID, priceID string, email string) (string, string, error) {
+	params := &stripe.CheckoutSessionParams{
+		Mode:          stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		SuccessURL:    stripe.String(s.config.FrontendURL + "/settings/billing?resubscribed=true"),
+		CancelURL:     stripe.String(s.config.FrontendURL + "/settings/billing"),
+		CustomerEmail: stripe.String(email),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{
+				Price:    stripe.String(priceID),
+				Quantity: stripe.Int64(1),
+			},
+		},
+		Metadata: map[string]string{
+			"resubscribe_server_id": serverID.String(),
+			"user_id":               userID.String(),
+		},
+	}
+
+	sess, err := session.New(params)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create resubscribe checkout session: %w", err)
+	}
+
+	return sess.ID, sess.URL, nil
+}
+
+// handleResubscribeCheckout processes a checkout session for resubscribing an expired server
+func (s *Service) handleResubscribeCheckout(ctx context.Context, eventID string, sess *stripe.CheckoutSession, serverIDStr string) error {
+	if sess.PaymentStatus != stripe.CheckoutSessionPaymentStatusPaid {
+		return fmt.Errorf("payment not completed: status %s", sess.PaymentStatus)
+	}
+
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return fmt.Errorf("invalid server ID: %w", err)
+	}
+
+	if sess.Subscription == nil {
+		return fmt.Errorf("subscription not found in checkout session")
+	}
+
+	subscriptionID := sess.Subscription.ID
+
+	// Reactivate the server with the new subscription ID
+	if err := s.db.ReactivateServer(ctx, serverID.String(), subscriptionID); err != nil {
+		return fmt.Errorf("failed to reactivate server: %w", err)
+	}
+
+	log.Printf("Server reactivated: event_id=%s server_id=%s subscription_id=%s", eventID, serverID, subscriptionID)
 	return nil
 }

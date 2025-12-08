@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "react-router-dom"
-import { ChevronDown, Settings, LogOut, Gamepad2 } from "lucide-react"
+import { ChevronDown, CreditCard, LogOut, Gamepad2 } from "lucide-react"
 import { useAuth } from "@/hooks/useAuth"
 import { Button } from "@/components/ui/button"
 import {
@@ -43,9 +43,9 @@ export function Navbar() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => navigate("/settings")}>
-                <Settings className="h-4 w-4" />
-                Settings
+              <DropdownMenuItem onClick={() => navigate("/settings/billing")}>
+                <CreditCard className="h-4 w-4" />
+                Billing
               </DropdownMenuItem>
               <DropdownMenuItem onClick={handleLogout}>
                 <LogOut className="h-4 w-4" />
