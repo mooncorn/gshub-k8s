@@ -101,6 +101,57 @@ func (h *ServerHandler) CreateCheckoutSession(c *gin.Context) {
 		return
 	}
 
+	// Validate resource capacity before proceeding to checkout
+	catalog, err := h.k8sClient.LoadGameCatalog(c.Request.Context(), h.config.K8sNamespace, h.config.K8sGameCatalogName)
+	if err != nil {
+		log.Printf("failed to load game catalog: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load game configuration"})
+		return
+	}
+
+	gameConfig, err := catalog.GetGameConfig(req.Game)
+	if err != nil {
+		log.Printf("game not found in catalog: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	planConfig, err := gameConfig.GetPlanConfig(req.Plan)
+	if err != nil {
+		log.Printf("plan not found in catalog: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Build port requirements from game config
+	portReqs := make([]portalloc.PortRequirement, len(gameConfig.Ports))
+	for i, p := range gameConfig.Ports {
+		portReqs[i] = portalloc.PortRequirement{Name: p.Name, Protocol: p.Protocol}
+	}
+
+	// Build resource requirements (with sidecar overhead)
+	cpuMillicores := parseCPUToMillicores(planConfig.CPU) + 100       // +100m for sidecar
+	memBytes := parseMemoryToBytes(planConfig.Memory) + 128*1024*1024 // +128Mi for sidecar
+	resourceReq := &portalloc.ResourceRequirement{
+		CPUMillicores: cpuMillicores,
+		MemoryBytes:   memBytes,
+	}
+
+	// Check capacity before proceeding to checkout
+	hasCapacity, err := h.portAllocService.HasCapacity(c.Request.Context(), portReqs, resourceReq)
+	if err != nil {
+		log.Printf("failed to check capacity: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check server availability"})
+		return
+	}
+	if !hasCapacity {
+		log.Printf("no capacity available for game=%s plan=%s", req.Game, req.Plan)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "No server capacity available at this time. Please try again later.",
+		})
+		return
+	}
+
 	// Create pending server request
 	displayName := &req.DisplayName
 	if req.DisplayName == "" {
@@ -901,4 +952,16 @@ func (h *ServerHandler) StreamStatus(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+}
+
+// parseCPUToMillicores converts a CPU string (e.g., "1", "500m") to millicores
+func parseCPUToMillicores(cpu string) int {
+	q := resource.MustParse(cpu)
+	return int(q.MilliValue())
+}
+
+// parseMemoryToBytes converts a memory string (e.g., "2Gi", "512Mi") to bytes
+func parseMemoryToBytes(memory string) int64 {
+	q := resource.MustParse(memory)
+	return q.Value()
 }

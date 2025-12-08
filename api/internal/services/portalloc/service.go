@@ -144,3 +144,46 @@ func (s *Service) HasAllocatedPorts(ctx context.Context, serverID uuid.UUID) (bo
 	}
 	return len(ports) > 0, nil
 }
+
+// HasCapacity checks if there's available capacity for a server with given requirements
+// This is a read-only check that does not allocate any resources
+// Used for optimistic validation before checkout
+func (s *Service) HasCapacity(ctx context.Context, requirements []PortRequirement, resourceReq *ResourceRequirement) (bool, error) {
+	// Count required ports by protocol
+	tcpCount := 0
+	udpCount := 0
+	for _, req := range requirements {
+		switch req.Protocol {
+		case "TCP":
+			tcpCount++
+		case "UDP":
+			udpCount++
+		}
+	}
+
+	// Apply overhead factor to resource requirements
+	cpuMillicores := 0
+	var memoryBytes int64 = 0
+	if resourceReq != nil {
+		cpuMillicores = int(float64(resourceReq.CPUMillicores) * k8s.ResourceOverheadFactor)
+		memoryBytes = int64(float64(resourceReq.MemoryBytes) * k8s.ResourceOverheadFactor)
+	}
+
+	hasCapacity, err := s.db.CheckResourceCapacity(ctx, tcpCount, udpCount, cpuMillicores, memoryBytes)
+	if err != nil {
+		s.logger.Error("failed to check resource capacity",
+			zap.Error(err),
+		)
+		return false, fmt.Errorf("failed to check resource capacity: %w", err)
+	}
+
+	s.logger.Debug("capacity check result",
+		zap.Bool("has_capacity", hasCapacity),
+		zap.Int("tcp_ports", tcpCount),
+		zap.Int("udp_ports", udpCount),
+		zap.Int("cpu_millicores", cpuMillicores),
+		zap.Int64("memory_bytes", memoryBytes),
+	)
+
+	return hasCapacity, nil
+}

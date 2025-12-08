@@ -371,6 +371,55 @@ func (db *DB) ReleaseServerPorts(ctx context.Context, serverID uuid.UUID) error 
 	return nil
 }
 
+// CheckResourceCapacity verifies if any node can accommodate the requested resources
+// This is a read-only check that does not allocate any resources
+// Returns true if capacity exists, false otherwise
+func (db *DB) CheckResourceCapacity(ctx context.Context, tcpPorts, udpPorts int, cpuMillicores int, memoryBytes int64) (bool, error) {
+	query := `
+		SELECT EXISTS (
+			SELECT 1
+			FROM nodes n
+			WHERE n.is_active = TRUE
+			AND n.allocatable_cpu_millicores IS NOT NULL
+			AND n.allocatable_memory_bytes IS NOT NULL
+			-- Port availability
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'TCP'
+			) >= $1
+			AND (
+				SELECT COUNT(*) FROM port_allocations pa
+				WHERE pa.node_id = n.id AND pa.server_id IS NULL AND pa.protocol = 'UDP'
+			) >= $2
+			-- Resource availability (capacity - sum of active reservations)
+			AND (
+				n.allocatable_cpu_millicores - COALESCE(
+					(SELECT SUM(s.reserved_cpu_millicores) FROM servers s
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_cpu_millicores IS NOT NULL), 0
+				)
+			) >= $3
+			AND (
+				n.allocatable_memory_bytes - COALESCE(
+					(SELECT SUM(s.reserved_memory_bytes) FROM servers s
+					 WHERE EXISTS (SELECT 1 FROM port_allocations pa WHERE pa.server_id = s.id AND pa.node_id = n.id)
+					   AND s.status NOT IN ('deleted', 'expired', 'failed')
+					   AND s.reserved_memory_bytes IS NOT NULL), 0
+				)
+			) >= $4
+			LIMIT 1
+		)
+	`
+
+	var exists bool
+	err := db.Pool.QueryRow(ctx, query, tcpPorts, udpPorts, cpuMillicores, memoryBytes).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check resource capacity: %w", err)
+	}
+	return exists, nil
+}
+
 // GetNodePortStats returns port usage statistics for a node
 func (db *DB) GetNodePortStats(ctx context.Context, nodeName string) (total, used int, err error) {
 	query := `
