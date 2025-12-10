@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/mooncorn/gshub/api/config"
@@ -278,36 +277,25 @@ func (h *ServerHandler) GetServer(c *gin.Context) {
 		return
 	}
 
-	// Try to get K8s GameServer status if server is in an active state
-	var k8sState *string
-	if server.Status == models.ServerStatusRunning ||
-		server.Status == models.ServerStatusPending ||
-		server.Status == models.ServerStatusStarting ||
-		server.Status == models.ServerStatusStopping {
-		gsName := "server-" + serverID
-		gs, err := h.k8sClient.GetGameServer(c.Request.Context(), h.config.K8sNamespace, gsName)
-		if err == nil && gs != nil {
-			state := string(gs.Status.State)
-			k8sState = &state
-		}
-	}
-
 	// Load game catalog to get default env
 	var gameConfigInfo *models.GameConfigInfo
 	catalog, err := h.k8sClient.LoadGameCatalog(c.Request.Context(), h.config.K8sNamespace, h.config.K8sGameCatalogName)
 	if err == nil {
 		if gameConfig, err := catalog.GetGameConfig(string(server.Game)); err == nil {
-			effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
-			gameConfigInfo = &models.GameConfigInfo{
-				DefaultEnv:   gameConfig.Env,
-				EffectiveEnv: effectiveEnv,
+			if planConfig, err := gameConfig.GetPlanConfig(string(server.Plan)); err == nil {
+				// Merge game + plan defaults for display
+				defaultEnv := k8s.MergeEnvVars(gameConfig.Env, planConfig.Env, nil)
+				effectiveEnv := k8s.MergeEnvVars(gameConfig.Env, planConfig.Env, server.EnvOverrides)
+				gameConfigInfo = &models.GameConfigInfo{
+					DefaultEnv:   defaultEnv,
+					EffectiveEnv: effectiveEnv,
+				}
 			}
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"server":      server,
-		"k8s_state":   k8sState,
 		"game_config": gameConfigInfo,
 	})
 }
@@ -373,25 +361,6 @@ func (h *ServerHandler) UpdateServerEnv(c *gin.Context) {
 		"status":  "updated",
 		"message": "Environment variables updated. Restart server for changes to take effect.",
 	})
-}
-
-// mergeEnvVars merges catalog defaults with user overrides (full override mode)
-func mergeEnvVars(defaults, overrides map[string]string) map[string]string {
-	if overrides == nil {
-		// NULL overrides = use defaults as-is
-		result := make(map[string]string, len(defaults))
-		for k, v := range defaults {
-			result[k] = v
-		}
-		return result
-	}
-
-	// Full override mode: overrides completely replace defaults
-	result := make(map[string]string, len(overrides))
-	for k, v := range overrides {
-		result[k] = v
-	}
-	return result
 }
 
 // StopServer stops a running game server by deleting it from K8s
@@ -516,145 +485,187 @@ func (h *ServerHandler) StartServer(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": "starting", "message": "server is starting"})
 }
 
-// triggerServerStart attempts to create K8s resources for a server immediately.
-// If it fails, the server remains in "pending" status and the reconciler will retry.
+// RestartServer restarts a server with updated environment variables.
+// This deletes the deployment and transitions to pending so the reconciler
+// creates a new deployment with the latest env vars from the database.
+func (h *ServerHandler) RestartServer(c *gin.Context) {
+	userIDStr := middleware.GetUserID(c)
+	if userIDStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user ID"})
+		return
+	}
+
+	serverID := c.Param("id")
+	if serverID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server ID required"})
+		return
+	}
+
+	// Get server from database
+	server, err := h.db.GetServerByID(c.Request.Context(), serverID)
+	if err != nil {
+		log.Printf("failed to get server: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Verify server belongs to user
+	if server.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	// Only restart from running or stopped states
+	if server.Status != models.ServerStatusRunning && server.Status != models.ServerStatusStopped {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server must be running or stopped to restart"})
+		return
+	}
+
+	// Delete deployment (keeps PVC with data intact)
+	deployName := "server-" + serverID
+	if err := h.k8sClient.DeleteGameDeployment(c.Request.Context(), h.config.K8sNamespace, deployName); err != nil {
+		log.Printf("RestartServer: failed to delete deployment for server %s: %v", serverID, err)
+		// Continue anyway - deployment might not exist
+	}
+
+	// Release port allocation (will be reallocated on next reconcile)
+	if err := h.portAllocService.ReleasePorts(c.Request.Context(), server.ID); err != nil {
+		log.Printf("RestartServer: failed to release ports for server %s: %v", serverID, err)
+		// Continue anyway
+	}
+
+	// Transition to pending - reconciler creates new deployment with updated env
+	transitioned, err := h.db.TransitionServerStatusFrom(
+		c.Request.Context(), serverID,
+		[]models.ServerStatus{models.ServerStatusRunning, models.ServerStatusStopped},
+		models.ServerStatusPending,
+		"Restarting server with updated configuration...",
+	)
+	if err != nil {
+		log.Printf("failed to transition to pending: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !transitioned {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server cannot be restarted from current state"})
+		return
+	}
+
+	// Broadcast status update
+	h.hub.Publish(server.UserID, broadcast.StatusEvent{
+		ServerID:  serverID,
+		Status:    string(models.ServerStatusPending),
+		Timestamp: time.Now().UTC(),
+	})
+
+	c.JSON(http.StatusAccepted, gin.H{"status": "restarting", "message": "server is restarting"})
+}
+
+// triggerServerStart attempts to start a server.
+// If a deployment already exists, it scales it to 1 (fast restart).
+// Otherwise, it leaves the server in "pending" for the reconciler to create the deployment.
 func (h *ServerHandler) triggerServerStart(server *models.Server) {
 	ctx := context.Background()
 	serverID := server.ID.String()
+	deployName := "server-" + serverID
 
-	// Load game catalog
-	catalog, err := h.k8sClient.LoadGameCatalog(ctx, h.config.K8sNamespace, h.config.K8sGameCatalogName)
+	// Check if deployment already exists (fast restart case)
+	exists, err := h.k8sClient.DeploymentExists(ctx, h.config.K8sNamespace, deployName)
 	if err != nil {
-		log.Printf("triggerServerStart: failed to load game catalog for server %s: %v", serverID, err)
+		log.Printf("triggerServerStart: failed to check deployment existence for server %s: %v", serverID, err)
 		return // Reconciler will retry
 	}
 
-	// Get game configuration
-	gameConfig, err := catalog.GetGameConfig(string(server.Game))
-	if err != nil {
-		log.Printf("triggerServerStart: invalid game config for server %s: %v", serverID, err)
-		return // Reconciler will handle and mark as failed
-	}
-
-	// Get plan configuration
-	planConfig, err := gameConfig.GetPlanConfig(string(server.Plan))
-	if err != nil {
-		log.Printf("triggerServerStart: invalid plan config for server %s: %v", serverID, err)
-		return // Reconciler will handle and mark as failed
-	}
-
-	// Check if ports already allocated
-	allocations, err := h.portAllocService.GetServerPorts(ctx, server.ID)
-	if err != nil {
-		log.Printf("triggerServerStart: failed to check port allocations for server %s: %v", serverID, err)
-		return // Reconciler will retry
-	}
-
-	// Allocate ports if needed
-	if len(allocations) == 0 {
-		portReqs := make([]portalloc.PortRequirement, len(gameConfig.Ports))
-		for i, p := range gameConfig.Ports {
-			portReqs[i] = portalloc.PortRequirement{
-				Name:     p.Name,
-				Protocol: p.Protocol,
-			}
+	if exists {
+		// Fast path: Just scale up existing deployment
+		if err := h.k8sClient.ScaleGameDeployment(ctx, h.config.K8sNamespace, deployName, 1); err != nil {
+			log.Printf("triggerServerStart: failed to scale deployment for server %s: %v", serverID, err)
+			return
 		}
 
-		// Add sidecar overhead: 100m CPU + 128Mi memory
-		cpuQty := resource.MustParse(planConfig.CPU)
-		memQty := resource.MustParse(planConfig.Memory)
-		cpuMillicores := int(cpuQty.MilliValue()) + 100
-		memBytes := memQty.Value() + 128*1024*1024
-
-		resourceReq := &portalloc.ResourceRequirement{
-			CPUMillicores: cpuMillicores,
-			MemoryBytes:   memBytes,
-		}
-
-		allocations, err = h.portAllocService.AllocatePorts(ctx, server.ID, portReqs, resourceReq)
+		// Transition to starting - supervisor will report running via internal API
+		transitioned, err := h.db.TransitionServerStatus(ctx, serverID,
+			models.ServerStatusPending, models.ServerStatusStarting,
+			"Starting game server...")
 		if err != nil {
-			log.Printf("triggerServerStart: failed to allocate ports for server %s: %v", serverID, err)
-			return // Reconciler will handle and mark as failed
+			log.Printf("triggerServerStart: failed to transition to starting for server %s: %v", serverID, err)
+			return
 		}
-		log.Printf("triggerServerStart: allocated ports for server %s on node %s", serverID, allocations[0].NodeName)
-	}
+		if transitioned {
+			log.Printf("triggerServerStart: scaled deployment to 1 for server %s (fast restart)", serverID)
 
-	// Create PVC if it doesn't exist
-	pvcName := fmt.Sprintf("server-%s", serverID)
-	labels := map[string]string{"server": serverID, "game": string(server.Game)}
-
-	if err := h.k8sClient.CreatePVC(ctx, h.config.K8sNamespace, pvcName, planConfig.Storage, labels); err != nil {
-		log.Printf("triggerServerStart: failed to create PVC for server %s: %v", serverID, err)
-		// Continue - may already exist, reconciler will handle
-	}
-
-	// Build static port configs from allocations
-	gsName := fmt.Sprintf("server-%s", serverID)
-	nodeName := allocations[0].NodeName
-
-	staticPorts := make([]k8s.StaticPortConfig, len(allocations))
-	for i, alloc := range allocations {
-		var containerPort int32
-		for _, p := range gameConfig.Ports {
-			if p.Name == alloc.PortName {
-				containerPort = p.Port
-				break
-			}
+			// Broadcast status update
+			h.hub.Publish(server.UserID, broadcast.StatusEvent{
+				ServerID:  serverID,
+				Status:    string(models.ServerStatusStarting),
+				Timestamp: time.Now().UTC(),
+			})
 		}
-		staticPorts[i] = k8s.StaticPortConfig{
-			Name:          alloc.PortName,
-			ContainerPort: containerPort,
-			HostPort:      int32(alloc.Port),
-			Protocol:      corev1.Protocol(alloc.Protocol),
-		}
-	}
-
-	// Convert volume configs
-	var volumes []k8s.VolumeConfig
-	for _, vol := range gameConfig.Volumes {
-		volumes = append(volumes, k8s.VolumeConfig{
-			Name:      vol.Name,
-			MountPath: vol.MountPath,
-			SubPath:   vol.SubPath,
-		})
-	}
-
-	// Compute effective env (merge catalog defaults with user overrides)
-	effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
-
-	// Create GameServer
-	if err := h.k8sClient.CreateGameServerWithStaticPorts(ctx, h.config.K8sNamespace, gsName, gameConfig.Image,
-		nodeName, staticPorts, volumes, effectiveEnv, planConfig.CPU, planConfig.Memory,
-		pvcName, labels, gameConfig.HealthCheck); err != nil {
-		log.Printf("triggerServerStart: failed to create GameServer for server %s: %v", serverID, err)
-		return // Reconciler will retry
-	}
-
-	// Transition to starting - reconciler will handle the Ready check
-	transitioned, err := h.db.TransitionServerStatus(ctx, serverID,
-		models.ServerStatusPending, models.ServerStatusStarting, "Creating game server...")
-	if err != nil {
-		log.Printf("triggerServerStart: failed to transition to starting for server %s: %v", serverID, err)
 		return
 	}
-	if transitioned {
-		log.Printf("triggerServerStart: server %s transitioned to starting", serverID)
-	}
+
+	// Slow path: No deployment exists, reconciler will create one
+	// Just leave server in "pending" state for reconciler
+	log.Printf("triggerServerStart: no deployment exists for server %s, reconciler will create", serverID)
 }
 
-// triggerServerStop attempts to delete K8s resources for a server immediately.
-// If it fails, the reconciler will retry the deletion.
+// triggerServerStop scales the deployment to 0 to stop the server.
+// The supervisor will receive SIGTERM and report "stopped" via internal API.
+// A fallback goroutine ensures the server is marked stopped if supervisor fails.
 func (h *ServerHandler) triggerServerStop(serverID string) {
 	ctx := context.Background()
-	gsName := "server-" + serverID
+	deployName := "server-" + serverID
 
-	if err := h.k8sClient.DeleteGameServer(ctx, h.config.K8sNamespace, gsName); err != nil {
-		log.Printf("triggerServerStop: failed to delete GameServer for server %s: %v", serverID, err)
-		// Reconciler will retry
+	// Scale to 0 - supervisor receives SIGTERM and reports status via internal API
+	if err := h.k8sClient.ScaleGameDeployment(ctx, h.config.K8sNamespace, deployName, 0); err != nil {
+		log.Printf("triggerServerStop: failed to scale deployment for server %s: %v", serverID, err)
+		return
+	}
+	log.Printf("triggerServerStop: scaled deployment to 0 for server %s", serverID)
+
+	// Start background fallback: mark as stopped if still "stopping" after timeout
+	go h.ensureStoppedState(serverID)
+}
+
+// ensureStoppedState is a fallback that marks server as stopped if supervisor
+// fails to report (e.g., pod was killed before graceful shutdown completed)
+func (h *ServerHandler) ensureStoppedState(serverID string) {
+	time.Sleep(90 * time.Second) // Wait longer than typical grace period
+
+	ctx := context.Background()
+	server, err := h.db.GetServerByID(ctx, serverID)
+	if err != nil {
 		return
 	}
 
-	log.Printf("triggerServerStop: deleted GameServer for server %s", serverID)
+	// If still in "stopping" state, force transition to "stopped"
+	if server.Status == models.ServerStatusStopping {
+		// Verify deployment is actually scaled to 0
+		deployName := "server-" + serverID
+		deploy, err := h.k8sClient.GetGameDeployment(ctx, h.config.K8sNamespace, deployName)
+		if err != nil || deploy == nil || (deploy.Spec.Replicas != nil && *deploy.Spec.Replicas == 0) {
+			transitioned, _ := h.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusStopping, models.ServerStatusStopped,
+				"Server stopped (fallback)")
+			if transitioned {
+				h.db.MarkServerStopped(ctx, serverID)
+				log.Printf("ensureStoppedState: fallback marked server %s as stopped", serverID)
+
+				// Broadcast status update
+				h.hub.Publish(server.UserID, broadcast.StatusEvent{
+					ServerID:  serverID,
+					Status:    string(models.ServerStatusStopped),
+					Timestamp: time.Now().UTC(),
+				})
+			}
+		}
+	}
 }
 
 // HandleStripeWebhook handles Stripe webhook events with proper error handling and deduplication
@@ -789,11 +800,23 @@ func (h *ServerHandler) StreamLogs(c *gin.Context) {
 	defer cancel()
 
 	// Start log streaming from K8s
-	podName := "server-" + serverID
-	const tailLines int64 = 50
-	const containerName = "game"
+	// Find the pod by label since Deployment pods have generated suffixes
+	labelSelector := "server=" + serverID
+	pod, err := h.k8sClient.GetPodByLabel(ctx, h.config.K8sNamespace, labelSelector)
+	if err != nil {
+		log.Printf("failed to find pod for server %s: %v", serverID, err)
+		c.SSEvent("error", gin.H{
+			"message": "Failed to find server pod",
+			"details": err.Error(),
+		})
+		c.Writer.Flush()
+		return
+	}
 
-	logStream, err := h.k8sClient.StreamPodLogs(ctx, h.config.K8sNamespace, podName, containerName, tailLines)
+	const tailLines int64 = 50
+	const containerName = "supervisor"
+
+	logStream, err := h.k8sClient.StreamPodLogs(ctx, h.config.K8sNamespace, pod.Name, containerName, tailLines)
 	if err != nil {
 		log.Printf("failed to stream logs for server %s: %v", serverID, err)
 		c.SSEvent("error", gin.H{

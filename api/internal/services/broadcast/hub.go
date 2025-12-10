@@ -100,26 +100,3 @@ func (h *Hub) Publish(userID uuid.UUID, event StatusEvent) {
 		}
 	}
 }
-
-// SubscriberCount returns the number of active subscribers for a user
-func (h *Hub) SubscriberCount(userID uuid.UUID) int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	if subs, ok := h.subscribers[userID]; ok {
-		return len(subs)
-	}
-	return 0
-}
-
-// TotalSubscriberCount returns the total number of active subscribers across all users
-func (h *Hub) TotalSubscriberCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	count := 0
-	for _, subs := range h.subscribers {
-		count += len(subs)
-	}
-	return count
-}

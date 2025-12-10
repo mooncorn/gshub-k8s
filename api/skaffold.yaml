@@ -13,9 +13,26 @@ build:
       manual:
       - src: "**/*.go"
         dest: /app
-  tagPolicy:
-    customTemplate:
-      template: "latest"
+  # Supervisor images for game servers
+  # - image: dasior/supervisor
+  #   context: ../supervisor
+  #   docker:
+  #     dockerfile: Dockerfile
+  # - image: dasior/supervisor-minecraft
+  #   context: ../supervisor
+  #   docker:
+  #     dockerfile: Dockerfile.minecraft
+  # - image: dasior/supervisor-valheim
+  #   context: ../supervisor
+  #   docker:
+  #     dockerfile: Dockerfile.valheim
+  # - image: dasior/supervisor-enshrouded
+  #   context: ../supervisor
+  #   docker:
+  #     dockerfile: Dockerfile.enshrouded
+  # tagPolicy:
+  #   customTemplate:
+  #     template: "latest"
   local:
     push: false
     useBuildkit: true
@@ -31,3 +48,14 @@ portForward:
   namespace: gshub
   port: 8080
   localPort: 8080
+- resourceType: service
+  resourceName: postgresql
+  namespace: gshub
+  port: 5432
+  localPort: 5432
+# Internal API port for supervisor communication
+- resourceType: service
+  resourceName: api
+  namespace: gshub
+  port: 8081
+  localPort: 8081

@@ -2,6 +2,9 @@ package reconciler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -76,15 +79,19 @@ func (r *ServerReconciler) reconcile(ctx context.Context) {
 	startTime := time.Now()
 
 	// Note: State detection (starting->running, stopping->stopped) is now handled by the
-	// GameServer watcher service in real-time. The reconciler only handles:
+	// supervisor reporting status via the internal API in real-time. The reconciler only handles:
 	// 1. Creating K8s resources for pending servers
 	// 2. Timeout detection for stuck servers
+	// 3. Heartbeat timeout detection for unresponsive servers
 
 	// 1. Handle startup timeouts - mark servers as failed if stuck in "starting"
 	r.reconcileStartupTimeouts(ctx)
 
 	// 2. Handle "pending" servers - create K8s resources
 	r.reconcilePendingServers(ctx)
+
+	// 3. Handle heartbeat timeouts - mark running servers as failed if unresponsive
+	r.reconcileHeartbeatTimeouts(ctx)
 
 	r.logger.Debug("reconciliation cycle complete", zap.Duration("duration", time.Since(startTime)))
 }
@@ -154,6 +161,61 @@ func (r *ServerReconciler) reconcilePendingServers(ctx context.Context) {
 	}
 }
 
+// reconcileHeartbeatTimeouts handles servers that have stopped sending heartbeats
+func (r *ServerReconciler) reconcileHeartbeatTimeouts(ctx context.Context) {
+	const heartbeatTimeoutMinutes = 2 // 4 missed heartbeats (30s interval)
+
+	// Get running servers without recent heartbeat
+	servers, err := r.db.GetServersWithoutRecentHeartbeat(ctx, models.ServerStatusRunning, heartbeatTimeoutMinutes)
+	if err != nil {
+		r.logger.Error("failed to get servers without heartbeat", zap.Error(err))
+		return
+	}
+
+	for _, server := range servers {
+		serverID := server.ID.String()
+
+		// Skip servers that just started (give time for first heartbeat)
+		// Use UpdatedAt as a proxy for when the server became "running"
+		if time.Since(server.UpdatedAt) < 3*time.Minute {
+			continue
+		}
+
+		r.logger.Warn("heartbeat timeout detected",
+			zap.String("server_id", serverID),
+			zap.Timep("last_heartbeat", server.LastHeartbeat),
+			zap.Time("updated_at", server.UpdatedAt))
+
+		// Check if deployment still exists
+		deployName := fmt.Sprintf("server-%s", serverID)
+		exists, err := r.k8sClient.DeploymentExists(ctx, r.k8sNamespace, deployName)
+		if err != nil {
+			r.logger.Error("failed to check deployment existence",
+				zap.Error(err),
+				zap.String("server_id", serverID))
+			continue
+		}
+
+		if !exists {
+			// Deployment gone but DB says running - update status
+			r.db.TransitionServerStatus(ctx, serverID,
+				models.ServerStatusRunning, models.ServerStatusFailed,
+				"Server stopped unexpectedly (deployment not found)")
+			r.logger.Warn("server deployment not found, marking failed", zap.String("server_id", serverID))
+			continue
+		}
+
+		// Deployment exists but supervisor not responding - mark as failed
+		transitioned, _ := r.db.TransitionServerStatus(ctx, serverID,
+			models.ServerStatusRunning, models.ServerStatusFailed,
+			"Server unresponsive (heartbeat timeout). Click Start to restart.")
+
+		if transitioned {
+			r.logger.Warn("server marked failed due to heartbeat timeout", zap.String("server_id", serverID))
+		}
+	}
+}
+
 // reconcileServer processes a single pending server
 func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.Server, catalog *k8s.GameCatalog) error {
 	serverID := server.ID.String()
@@ -174,6 +236,18 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.MarkServerFailed(ctx, serverID, errMsg)
 	}
 
+	// Calculate supervisor overhead
+	supervisorCPU := 50   // 50m default
+	supervisorMem := int64(64 * 1024 * 1024) // 64Mi default
+	if gameConfig.SupervisorOverhead != nil {
+		if gameConfig.SupervisorOverhead.CPU != "" {
+			supervisorCPU = parseCPUToMillicores(gameConfig.SupervisorOverhead.CPU)
+		}
+		if gameConfig.SupervisorOverhead.Memory != "" {
+			supervisorMem = parseMemoryToBytes(gameConfig.SupervisorOverhead.Memory)
+		}
+	}
+
 	// STEP 1: Allocate ports (if not already allocated)
 	allocations, err := r.portAllocService.GetServerPorts(ctx, server.ID)
 	if err != nil {
@@ -191,10 +265,9 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 			}
 		}
 
-		// Build resource requirements from plan config
-		// Add sidecar overhead: 100m CPU + 128Mi memory
-		cpuMillicores := parseCPUToMillicores(planConfig.CPU) + 100
-		memBytes := parseMemoryToBytes(planConfig.Memory) + 128*1024*1024
+		// Build resource requirements from plan config + supervisor overhead
+		cpuMillicores := parseCPUToMillicores(planConfig.CPU) + supervisorCPU
+		memBytes := parseMemoryToBytes(planConfig.Memory) + supervisorMem
 
 		resourceReq := &portalloc.ResourceRequirement{
 			CPUMillicores: cpuMillicores,
@@ -218,7 +291,11 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 
 	// STEP 2: Create PVC if it doesn't exist
 	pvcName := fmt.Sprintf("server-%s", serverID)
-	labels := map[string]string{"server": serverID, "game": string(server.Game)}
+	labels := map[string]string{
+		"server":           serverID,
+		"game":             string(server.Game),
+		"app":              "game-server",
+	}
 
 	err = r.k8sClient.CreatePVC(ctx, r.k8sNamespace, pvcName, planConfig.Storage, labels)
 	if err != nil && !isAlreadyExistsError(err) {
@@ -226,8 +303,19 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// STEP 3: Create GameServer with static ports pinned to the allocated node
-	gsName := fmt.Sprintf("server-%s", serverID)
+	// STEP 3: Generate auth token for supervisor
+	authToken, err := generateAuthToken()
+	if err != nil {
+		r.logger.Error("failed to generate auth token", zap.String("server_id", serverID), zap.Error(err))
+		return r.db.UpdateServerLastReconciled(ctx, serverID)
+	}
+	if err := r.db.SetServerAuthToken(ctx, serverID, authToken); err != nil {
+		r.logger.Error("failed to save auth token", zap.String("server_id", serverID), zap.Error(err))
+		return r.db.UpdateServerLastReconciled(ctx, serverID)
+	}
+
+	// STEP 4: Create Deployment with supervisor
+	deployName := fmt.Sprintf("server-%s", serverID)
 	nodeName := allocations[0].NodeName
 
 	// Build static port configs from allocations
@@ -259,18 +347,84 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 		})
 	}
 
-	// Compute effective env (merge catalog defaults with user overrides)
-	effectiveEnv := mergeEnvVars(gameConfig.Env, server.EnvOverrides)
+	// Compute effective env (merge game defaults, plan defaults, and user overrides)
+	effectiveEnv := k8s.MergeEnvVars(gameConfig.Env, planConfig.Env, server.EnvOverrides)
 
-	err = r.k8sClient.CreateGameServerWithStaticPorts(ctx, r.k8sNamespace, gsName, gameConfig.Image,
-		nodeName, staticPorts, volumes, effectiveEnv, planConfig.CPU, planConfig.Memory,
-		pvcName, labels, gameConfig.HealthCheck)
+	// Add supervisor environment variables
+	effectiveEnv["GSHUB_SERVER_ID"] = serverID
+	effectiveEnv["GSHUB_API_ENDPOINT"] = fmt.Sprintf("http://api.%s.svc:8081", r.k8sNamespace)
+	effectiveEnv["GSHUB_AUTH_TOKEN"] = authToken
+
+	// Add process configuration for supervisor
+	if gameConfig.Process != nil {
+		if len(gameConfig.Process.StartCommand) > 0 {
+			cmdJSON, _ := json.Marshal(gameConfig.Process.StartCommand)
+			effectiveEnv["GSHUB_START_COMMAND"] = string(cmdJSON)
+		}
+		if gameConfig.Process.WorkDir != "" {
+			effectiveEnv["GSHUB_WORK_DIR"] = gameConfig.Process.WorkDir
+		}
+		if gameConfig.Process.GracePeriod > 0 {
+			effectiveEnv["GSHUB_GRACE_PERIOD"] = fmt.Sprintf("%d", gameConfig.Process.GracePeriod)
+		}
+	}
+
+	// Add health check configuration for supervisor
+	if gameConfig.HealthCheck != nil {
+		effectiveEnv["GSHUB_HEALTH_TYPE"] = gameConfig.HealthCheck.Type
+		effectiveEnv["GSHUB_HEALTH_PORT"] = gameConfig.HealthCheck.Port
+		effectiveEnv["GSHUB_HEALTH_PROTOCOL"] = gameConfig.HealthCheck.Protocol
+		if gameConfig.HealthCheck.InitialDelay != "" {
+			effectiveEnv["GSHUB_HEALTH_INITIAL_DELAY"] = gameConfig.HealthCheck.InitialDelay
+		}
+		if gameConfig.HealthCheck.Timeout != "" {
+			effectiveEnv["GSHUB_HEALTH_TIMEOUT"] = gameConfig.HealthCheck.Timeout
+		}
+		if gameConfig.HealthCheck.Interval != "" {
+			effectiveEnv["GSHUB_HEALTH_INTERVAL"] = gameConfig.HealthCheck.Interval
+		}
+		if gameConfig.HealthCheck.Pattern != "" {
+			effectiveEnv["GSHUB_HEALTH_PATTERN"] = gameConfig.HealthCheck.Pattern
+		}
+	}
+
+	// Determine image to use (prefer supervisorImage, fallback to legacy image)
+	image := gameConfig.SupervisorImage
+	if image == "" {
+		image = gameConfig.Image
+	}
+
+	// Calculate total resources (plan + supervisor overhead)
+	totalCPU := fmt.Sprintf("%dm", parseCPUToMillicores(planConfig.CPU)+supervisorCPU)
+	totalMemBytes := parseMemoryToBytes(planConfig.Memory) + supervisorMem
+	totalMem := fmt.Sprintf("%d", totalMemBytes)
+
+	// Get grace period
+	gracePeriod := int32(30)
+	if gameConfig.Process != nil && gameConfig.Process.GracePeriod > 0 {
+		gracePeriod = int32(gameConfig.Process.GracePeriod)
+	}
+
+	err = r.k8sClient.CreateGameDeployment(ctx, k8s.DeploymentParams{
+		Namespace:   r.k8sNamespace,
+		Name:        deployName,
+		Image:       image,
+		NodeName:    nodeName,
+		Ports:       staticPorts,
+		Volumes:     volumes,
+		Env:         effectiveEnv,
+		CPURequest:  totalCPU,
+		MemRequest:  totalMem,
+		PVCName:     pvcName,
+		Labels:      labels,
+		GracePeriod: gracePeriod,
+	})
 	if err != nil && !isAlreadyExistsError(err) {
-		r.logger.Error("failed to create GameServer", zap.String("server_id", serverID), zap.Error(err))
+		r.logger.Error("failed to create Deployment", zap.String("server_id", serverID), zap.Error(err))
 		return r.db.UpdateServerLastReconciled(ctx, serverID)
 	}
 
-	// STEP 4: Transition to "starting" - reconcileStartingServers will handle the Ready check
+	// STEP 5: Transition to "starting" - supervisor will report status via internal API
 	transitioned, err := r.db.TransitionServerStatus(ctx, serverID,
 		models.ServerStatusPending, models.ServerStatusStarting, "Creating game server...")
 	if err != nil {
@@ -291,6 +445,15 @@ func (r *ServerReconciler) reconcileServer(ctx context.Context, server *models.S
 	return nil
 }
 
+// generateAuthToken creates a secure random token for supervisor authentication
+func generateAuthToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
 // isAlreadyExistsError checks if an error is due to a resource already existing
 func isAlreadyExistsError(err error) bool {
 	return errors.IsAlreadyExists(err)
@@ -308,21 +471,3 @@ func parseMemoryToBytes(memory string) int64 {
 	return q.Value()
 }
 
-// mergeEnvVars merges catalog defaults with user overrides (full override mode)
-func mergeEnvVars(defaults, overrides map[string]string) map[string]string {
-	if overrides == nil {
-		// NULL overrides = use defaults as-is
-		result := make(map[string]string, len(defaults))
-		for k, v := range defaults {
-			result[k] = v
-		}
-		return result
-	}
-
-	// Full override mode: overrides completely replace defaults
-	result := make(map[string]string, len(overrides))
-	for k, v := range overrides {
-		result[k] = v
-	}
-	return result
-}

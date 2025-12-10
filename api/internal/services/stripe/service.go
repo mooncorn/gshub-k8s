@@ -231,12 +231,12 @@ func (s *Service) handleSubscriptionDeleted(ctx context.Context, event *stripe.E
 		// Continue - status is already expired, timestamps are secondary
 	}
 
-	// 3. Delete GameServer from K8s (idempotent - may not exist if stopped)
-	gsName := "server-" + serverID
-	if err := s.k8sClient.DeleteGameServer(ctx, s.k8sNamespace, gsName); err != nil {
-		log.Printf("Failed to delete GameServer (may not exist): event_id=%s server_id=%s error=%v", event.ID, serverID, err)
+	// 3. Delete Deployment from K8s (idempotent - may not exist if stopped)
+	deployName := "server-" + serverID
+	if err := s.k8sClient.DeleteGameDeployment(ctx, s.k8sNamespace, deployName); err != nil {
+		log.Printf("Failed to delete Deployment (may not exist): event_id=%s server_id=%s error=%v", event.ID, serverID, err)
 	} else {
-		log.Printf("Deleted GameServer: event_id=%s server_id=%s", event.ID, serverID)
+		log.Printf("Deleted Deployment: event_id=%s server_id=%s", event.ID, serverID)
 	}
 
 	// 4. Release port allocations (idempotent - may not be allocated)

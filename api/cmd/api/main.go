@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"regexp"
 
 	"github.com/gin-gonic/gin"
@@ -16,9 +17,9 @@ import (
 	"github.com/mooncorn/gshub/api/internal/services/cleanup"
 	"github.com/mooncorn/gshub/api/internal/services/k8s"
 	"github.com/mooncorn/gshub/api/internal/services/nodesync"
+	"github.com/mooncorn/gshub/api/internal/services/podmonitor"
 	"github.com/mooncorn/gshub/api/internal/services/portalloc"
 	"github.com/mooncorn/gshub/api/internal/services/reconciler"
-	"github.com/mooncorn/gshub/api/internal/services/watcher"
 	"go.uber.org/zap"
 )
 
@@ -83,12 +84,6 @@ func main() {
 	hub := broadcast.NewHub(logger)
 	log.Println("Broadcast hub initialized")
 
-	// Initialize and start GameServer watcher for real-time K8s state updates
-	watcherService := watcher.NewService(database, k8sClient.AgonesClientset(), hub, logger, cfg.K8sNamespace)
-	watcherService.Start(ctx)
-	defer watcherService.Stop()
-	log.Println("GameServer watcher started")
-
 	// Initialize and start node sync service
 	nodeSyncConfig := nodesync.Config{
 		PortRangeMin:  cfg.PortRangeMin,
@@ -120,9 +115,34 @@ func main() {
 
 	log.Println("Cleanup service started")
 
+	// Initialize and start the pod monitor service
+	podMonitorService := podmonitor.NewPodMonitor(database, k8sClient, hub, logger, cfg.K8sNamespace)
+	podMonitorService.Start(ctx)
+	defer podMonitorService.Stop()
+
+	log.Println("Pod monitor service started")
+
 	handlers := api.NewHandlers(database, cfg, k8sClient, portAllocService, hub)
 	r := gin.Default()
 	handlers.RegisterRoutes(r)
+
+	// Start internal API server for supervisor communication
+	internalHandler := api.NewInternalHandler(database, hub, logger)
+	internalRouter := gin.New()
+	internalRouter.Use(gin.Recovery())
+	internalHandler.RegisterInternalRoutes(internalRouter)
+
+	go func() {
+		internalPort := "8081"
+		log.Printf("Starting internal API server on :%s", internalPort)
+		internalServer := &http.Server{
+			Addr:    ":" + internalPort,
+			Handler: internalRouter,
+		}
+		if err := internalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Internal API server error: %v", err)
+		}
+	}()
 
 	// Start server
 	log.Printf("Starting server on :%s", cfg.Port)

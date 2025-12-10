@@ -7,8 +7,12 @@ spec:
   selector:
     app: api
   ports:
-  - port: 8080
+  - name: http
+    port: 8080
     targetPort: 8080
+  - name: internal
+    port: 8081
+    targetPort: 8081
   type: ClusterIP
 ---
 apiVersion: apps/v1
@@ -41,6 +45,9 @@ spec:
         image: dasior/gshub-api:latest
         ports:
         - containerPort: 8080
+          name: http
+        - containerPort: 8081
+          name: internal
         env:
         - name: DB_HOST
           value: "postgresql-svc.gshub.svc"

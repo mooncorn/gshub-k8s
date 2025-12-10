@@ -714,3 +714,151 @@ func (db *DB) ReactivateServer(ctx context.Context, id string, subscriptionID st
 
 	return nil
 }
+
+// SetServerAuthToken stores the auth token for a server (used by supervisor)
+func (db *DB) SetServerAuthToken(ctx context.Context, serverID, token string) error {
+	query := `
+		UPDATE servers
+		SET auth_token = $2,
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := db.Pool.Exec(ctx, query, serverID, token)
+	if err != nil {
+		return fmt.Errorf("failed to set server auth token: %w", err)
+	}
+	return nil
+}
+
+// ValidateServerAuthToken validates the auth token for a server
+func (db *DB) ValidateServerAuthToken(ctx context.Context, serverID, token string) (bool, error) {
+	query := `
+		SELECT COUNT(*) FROM servers
+		WHERE id = $1 AND auth_token = $2
+	`
+	var count int
+	err := db.Pool.QueryRow(ctx, query, serverID, token).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to validate auth token: %w", err)
+	}
+	return count == 1, nil
+}
+
+// UpdateServerHeartbeat updates the last_heartbeat timestamp
+func (db *DB) UpdateServerHeartbeat(ctx context.Context, serverID string) error {
+	query := `
+		UPDATE servers
+		SET last_heartbeat = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := db.Pool.Exec(ctx, query, serverID)
+	if err != nil {
+		return fmt.Errorf("failed to update heartbeat: %w", err)
+	}
+	return nil
+}
+
+// UpdateServerStatusAny updates server status from any current status
+func (db *DB) UpdateServerStatusAny(ctx context.Context, id string, toStatus models.ServerStatus, message string) error {
+	query := `
+		UPDATE servers
+		SET status = $2,
+		    status_message = $3,
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := db.Pool.Exec(ctx, query, id, string(toStatus), message)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+	return nil
+}
+
+// GetServersWithoutRecentHeartbeat finds servers with stale heartbeats
+func (db *DB) GetServersWithoutRecentHeartbeat(ctx context.Context, status models.ServerStatus, threshold int) ([]models.Server, error) {
+	query := `
+		SELECT id, user_id, display_name, subdomain, game, plan, status, status_message,
+		       creation_error, last_reconciled, stripe_subscription_id,
+		       created_at, updated_at, stopped_at, expired_at, delete_after, env_overrides,
+		       last_heartbeat
+		FROM servers
+		WHERE status = $1
+		  AND (last_heartbeat IS NULL OR last_heartbeat < NOW() - $2 * interval '1 minute')
+		ORDER BY last_heartbeat ASC NULLS FIRST
+	`
+
+	rows, err := db.Pool.Query(ctx, query, string(status), threshold)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get servers without heartbeat: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []models.Server
+	for rows.Next() {
+		var server models.Server
+		var envOverridesJSON []byte
+		err := rows.Scan(
+			&server.ID,
+			&server.UserID,
+			&server.DisplayName,
+			&server.Subdomain,
+			&server.Game,
+			&server.Plan,
+			&server.Status,
+			&server.StatusMessage,
+			&server.CreationError,
+			&server.LastReconciled,
+			&server.StripeSubscriptionID,
+			&server.CreatedAt,
+			&server.UpdatedAt,
+			&server.StoppedAt,
+			&server.ExpiredAt,
+			&server.DeleteAfter,
+			&envOverridesJSON,
+			&server.LastHeartbeat,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan server: %w", err)
+		}
+		if envOverridesJSON != nil {
+			if err := json.Unmarshal(envOverridesJSON, &server.EnvOverrides); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal env_overrides: %w", err)
+			}
+		}
+		servers = append(servers, server)
+	}
+
+	return servers, nil
+}
+
+// UpdateServerRestartCount updates the restart count for a server
+func (db *DB) UpdateServerRestartCount(ctx context.Context, serverID string, count int) error {
+	query := `
+		UPDATE servers
+		SET restart_count = $2,
+		    last_restart_at = CASE WHEN $2 > COALESCE(restart_count, 0) THEN NOW() ELSE last_restart_at END,
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := db.Pool.Exec(ctx, query, serverID, count)
+	if err != nil {
+		return fmt.Errorf("failed to update restart count: %w", err)
+	}
+	return nil
+}
+
+// RecordOOMEvent records an OOM kill event for a server
+func (db *DB) RecordOOMEvent(ctx context.Context, serverID string) error {
+	query := `
+		UPDATE servers
+		SET last_oom_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := db.Pool.Exec(ctx, query, serverID)
+	if err != nil {
+		return fmt.Errorf("failed to record OOM event: %w", err)
+	}
+	return nil
+}

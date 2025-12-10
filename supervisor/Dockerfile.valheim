@@ -1,0 +1,46 @@
+# Valheim Supervisor Image
+# Combines the supervisor binary with steamcmd for Valheim server
+
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the supervisor binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o supervisor ./cmd/supervisor
+
+# Use steamcmd base image
+FROM cm2network/steamcmd:root
+
+USER root
+
+# Create directories with proper permissions for steam user
+RUN mkdir -p /valheim /config && \
+    chown -R steam:steam /valheim /config
+
+# Install supervisor
+COPY --from=builder /build/supervisor /usr/local/bin/supervisor
+
+# Copy start script and set ownership to steam user
+COPY --chown=steam:steam scripts/valheim-start.sh /valheim/start.sh
+RUN chmod +x /valheim/start.sh
+
+# Run as steam user (steamcmd works better this way)
+USER steam
+
+# The supervisor will start the Valheim server as a child process
+ENV GSHUB_START_COMMAND='["/valheim/start.sh"]'
+ENV GSHUB_WORK_DIR=/config
+ENV GSHUB_GRACE_PERIOD=60
+# Use log pattern matching - UDP port checks don't work reliably
+ENV GSHUB_HEALTH_TYPE=log-pattern
+ENV GSHUB_HEALTH_PATTERN="Game server connected"
+
+# Override the default entrypoint
+ENTRYPOINT ["/usr/local/bin/supervisor"]

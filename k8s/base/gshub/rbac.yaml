@@ -44,15 +44,15 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list"]
 
-  # Permissions for managing Agones GameServers
-  - apiGroups: ["agones.dev"]
-    resources: ["gameservers"]
-    verbs: ["get", "list", "create", "update", "delete", "watch"]
+  # Permissions for managing Deployments (supervisor pattern)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 
-  # Permissions for reading GameServer status
-  - apiGroups: ["agones.dev"]
-    resources: ["gameservers/status"]
-    verbs: ["get", "list"]
+  # Permissions for scaling Deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
 
 ---
 # ClusterRoleBinding: The "job assignment" - connecting the identity to permissions
@@ -72,42 +72,15 @@ subjects:
     namespace: gshub
 
 ---
-# ServiceAccount: The "identity" for Agones SDK (used by GameServer pods)
+# ServiceAccount: The "identity" for supervisor pods (minimal permissions)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: agones-sdk
+  name: gshub-supervisor
   namespace: gshub
   labels:
-    app: agones-sdk
+    app: gshub-supervisor
 
----
-# ClusterRole: Permissions for Agones SDK pods to access Kubernetes resources
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: agones-sdk
-  labels:
-    app: agones-sdk
-rules:
-  # Allow pods to read and update their own GameServer status
-  - apiGroups: ["agones.dev"]
-    resources: ["gameservers"]
-    verbs: ["get", "list", "watch", "patch"]
-
----
-# ClusterRoleBinding: Connect agones-sdk identity to its permissions
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: agones-sdk
-  labels:
-    app: agones-sdk
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: agones-sdk
-subjects:
-  - kind: ServiceAccount
-    name: agones-sdk
-    namespace: gshub
+# Note: gshub-supervisor doesn't need a ClusterRole/ClusterRoleBinding
+# because it communicates with the API via internal HTTP endpoints,
+# not directly with the Kubernetes API.

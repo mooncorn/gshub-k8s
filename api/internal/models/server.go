@@ -27,6 +27,7 @@ type Server struct {
 	ExpiredAt            *time.Time        `json:"expired_at,omitempty"`
 	DeleteAfter          *time.Time        `json:"delete_after,omitempty"`
 	EnvOverrides         map[string]string `json:"env_overrides,omitempty"`
+	LastHeartbeat        *time.Time        `json:"last_heartbeat,omitempty"`
 }
 
 // ServerPort represents a single port configuration

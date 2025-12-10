@@ -9,6 +9,7 @@ data:
       minecraft:
         name: "Minecraft: Java Edition"
         image: "itzg/minecraft-server:latest"
+        supervisorImage: "dasior/supervisor-minecraft:latest"
         ports:
         - name: "game"
           port: 25565
@@ -20,32 +21,47 @@ data:
         env:
           EULA: "TRUE"
           TYPE: "PAPER"
+        process:
+          startCommand: ["/start"]
+          workDir: "/data"
+          gracePeriod: 30
         healthCheck:
           type: "port"
           port: "25565"
           protocol: "TCP"
           initialDelay: "15"
           timeout: "120"
+          interval: "10"
+        supervisorOverhead:
+          cpu: "50m"
+          memory: "64Mi"
         plans:
           small:
             name: "Small"
             cpu: "1"
             memory: "2Gi"
             storage: "5Gi"
+            env:
+              MEMORY: "1536M"
           medium:
             name: "Medium"
             cpu: "2"
             memory: "4Gi"
             storage: "10Gi"
+            env:
+              MEMORY: "3G"
           large:
             name: "Large"
             cpu: "4"
             memory: "8Gi"
             storage: "20Gi"
+            env:
+              MEMORY: "6G"
 
       valheim:
         name: "Valheim"
         image: "lloesche/valheim-server:latest"
+        supervisorImage: "dasior/supervisor-valheim:latest"
         ports:
         - name: "game"
           port: 2456
@@ -59,12 +75,20 @@ data:
           sub_path: "data"
         env:
           SERVER_PUBLIC: "false"
+        process:
+          startCommand: ["/valheim/start.sh"]
+          workDir: "/config"
+          gracePeriod: 60
         healthCheck:
           type: "port"
           port: "2456"
           protocol: "UDP"
-          initialDelay: "20"
-          timeout: "120"
+          initialDelay: "30"
+          timeout: "180"
+          interval: "15"
+        supervisorOverhead:
+          cpu: "50m"
+          memory: "64Mi"
         plans:
           small:
             name: "Small"
@@ -76,3 +100,45 @@ data:
             cpu: "3"
             memory: "6Gi"
             storage: "10Gi"
+
+      enshrouded:
+        name: "Enshrouded"
+        supervisorImage: "dasior/supervisor-enshrouded:latest"
+        ports:
+        - name: "game"
+          port: 15636
+          protocol: "UDP"
+        - name: "query"
+          port: 15637
+          protocol: "UDP"
+        volumes:
+        - name: "data"
+          mount_path: "/game/savegame"
+          sub_path: "data"
+        env:
+          SERVER_NAME: "Enshrouded Server"
+        process:
+          startCommand: ["wine", "/game/enshrouded_server.exe"]
+          workDir: "/game"
+          gracePeriod: 45
+        healthCheck:
+          type: "port"
+          port: "15636"
+          protocol: "UDP"
+          initialDelay: "60"
+          timeout: "300"
+          interval: "15"
+        supervisorOverhead:
+          cpu: "100m"
+          memory: "128Mi"
+        plans:
+          small:
+            name: "Small"
+            cpu: "2"
+            memory: "8Gi"
+            storage: "10Gi"
+          medium:
+            name: "Medium"
+            cpu: "4"
+            memory: "16Gi"
+            storage: "20Gi"

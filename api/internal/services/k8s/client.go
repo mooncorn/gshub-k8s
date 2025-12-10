@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
-	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
-	agonesclient "agones.dev/agones/pkg/client/clientset/versioned"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -21,14 +20,7 @@ import (
 // to reserve capacity for system overhead (kubelet, containerd, OS)
 const ResourceOverheadFactor = 0.90 // 10% reserved for system
 
-// PortConfig defines a port for GameServer (dynamic allocation)
-type PortConfig struct {
-	Name          string
-	ContainerPort int32
-	Protocol      corev1.Protocol
-}
-
-// StaticPortConfig defines a port for GameServer with a pre-allocated host port
+// StaticPortConfig defines a port with a pre-allocated host port
 type StaticPortConfig struct {
 	Name          string
 	ContainerPort int32
@@ -43,11 +35,10 @@ type VolumeConfig struct {
 	SubPath   string
 }
 
-// Client wraps Kubernetes and Agones clients
+// Client wraps Kubernetes client
 type Client struct {
-	clientset       *kubernetes.Clientset   // Standard K8s resources (Pods, PVCs, Nodes)
-	agonesClientset *agonesclient.Clientset // Agones GameServers
-	config          *rest.Config
+	clientset *kubernetes.Clientset // Standard K8s resources (Pods, PVCs, Nodes, Deployments)
+	config    *rest.Config
 }
 
 // NewClient initializes a new Kubernetes client with in-cluster config or kubeconfig fallback
@@ -71,22 +62,10 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("failed to create K8s client: %w", err)
 	}
 
-	// Create Agones client for GameServer resources
-	agonesClientset, err := agonesclient.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Agones client: %w", err)
-	}
-
 	return &Client{
-		clientset:       clientset,
-		agonesClientset: agonesClientset,
-		config:          config,
+		clientset: clientset,
+		config:    config,
 	}, nil
-}
-
-// AgonesClientset returns the Agones clientset for use with informers
-func (c *Client) AgonesClientset() *agonesclient.Clientset {
-	return c.agonesClientset
 }
 
 // Health checks connectivity to the Kubernetes API server
@@ -123,373 +102,6 @@ func (c *Client) CreatePVC(ctx context.Context, namespace, name, storageSize str
 	return nil
 }
 
-// CreateGameServer creates an Agones GameServer resource
-func (c *Client) CreateGameServer(
-	ctx context.Context,
-	namespace, name, image string,
-	ports []PortConfig,
-	volumes []VolumeConfig,
-	env map[string]string,
-	cpuRequest, memoryRequest string,
-	pvcName string,
-	labels map[string]string,
-	healthCheck *HealthCheckConfig,
-) error {
-
-	// Build environment variables
-	var envVars []corev1.EnvVar
-	for key, value := range env {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  key,
-			Value: value,
-		})
-	}
-
-	// Build Agones ports from multiple ports
-	var gameServerPorts []agonesv1.GameServerPort
-	for _, port := range ports {
-		gameServerPorts = append(gameServerPorts, agonesv1.GameServerPort{
-			Name:          port.Name,
-			PortPolicy:    agonesv1.Dynamic,
-			ContainerPort: port.ContainerPort,
-			Protocol:      port.Protocol,
-		})
-	}
-
-	// Build volume mounts from multiple volumes (all using same PVC)
-	var volumeMounts []corev1.VolumeMount
-	for _, vol := range volumes {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "server-data", // Single volume name
-			MountPath: vol.MountPath,
-			SubPath:   vol.SubPath, // Different subdirectories
-		})
-	}
-
-	// Single PVC volume (all mounts reference this)
-	podVolumes := []corev1.Volume{
-		{
-			Name: "server-data",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-				},
-			},
-		},
-	}
-
-	// Build containers slice with game server and optional sidecar
-	containers := []corev1.Container{
-		{
-			Name:         "game",
-			Image:        image,
-			Env:          envVars,
-			VolumeMounts: volumeMounts, // Multiple mounts
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse(cpuRequest),
-					corev1.ResourceMemory: resource.MustParse(memoryRequest),
-				},
-			},
-		},
-	}
-
-	// Add Agones SDK sidecar if health check is configured
-	if healthCheck != nil {
-		sidecarContainer := buildAgonesSidecarContainer(healthCheck)
-		containers = append(containers, sidecarContainer)
-	}
-
-	gs := &agonesv1.GameServer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
-		},
-		Spec: agonesv1.GameServerSpec{
-			Ports:     gameServerPorts,                 // Multiple ports
-			Container: "game",                          // Specify which container is the game server (required when using multiple containers)
-			Health:    agonesv1.Health{Disabled: true}, // Disable Agones' default health checks - our sidecar handles readiness
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					ServiceAccountName: "agones-sdk",
-					// Fix DNS resolution for external hostnames like "fill.papermc.io"
-					// Default ndots:5 causes short hostnames to append cluster search domains first
-					DNSConfig: &corev1.PodDNSConfig{
-						Options: []corev1.PodDNSConfigOption{
-							{
-								Name:  "ndots",
-								Value: func() *string { s := "2"; return &s }(),
-							},
-						},
-					},
-					// Node affinity: Schedule on nodes with game-compute OR control-plane workload
-					// This allows GameServers to run in both k3d (control-plane) and k3s production (game-compute)
-					Affinity: &corev1.Affinity{
-						NodeAffinity: &corev1.NodeAffinity{
-							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-								NodeSelectorTerms: []corev1.NodeSelectorTerm{
-									{
-										MatchExpressions: []corev1.NodeSelectorRequirement{
-											{
-												// Accept nodes with workload-type=game-compute (k3s agents)
-												// OR workload-type=control-plane (k3d development)
-												Key:      "workload-type",
-												Operator: corev1.NodeSelectorOpIn,
-												Values:   []string{"game-compute", "control-plane"},
-											},
-											{
-												// Must also have gameserver role
-												Key:      "node-role.kubernetes.io/gameserver",
-												Operator: corev1.NodeSelectorOpIn,
-												Values:   []string{"true"},
-											},
-										},
-									},
-								},
-							},
-						},
-						// Spread GameServers across nodes for better distribution
-						PodAntiAffinity: &corev1.PodAntiAffinity{
-							PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
-								{
-									Weight: 100,
-									PodAffinityTerm: corev1.PodAffinityTerm{
-										LabelSelector: &metav1.LabelSelector{
-											MatchExpressions: []metav1.LabelSelectorRequirement{
-												{
-													Key:      "agones.dev/role",
-													Operator: metav1.LabelSelectorOpIn,
-													Values:   []string{"gameserver"},
-												},
-											},
-										},
-										TopologyKey: "kubernetes.io/hostname",
-									},
-								},
-							},
-						},
-					},
-					Containers: containers,
-					Volumes:    podVolumes, // Single PVC
-				},
-			},
-		},
-	}
-
-	_, err := c.agonesClientset.AgonesV1().GameServers(namespace).Create(ctx, gs, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create GameServer: %w", err)
-	}
-
-	return nil
-}
-
-// CreateGameServerWithStaticPorts creates an Agones GameServer with pre-allocated static ports
-// pinned to a specific node using hard node affinity
-func (c *Client) CreateGameServerWithStaticPorts(
-	ctx context.Context,
-	namespace, name, image string,
-	nodeName string, // Target node name for hard affinity
-	ports []StaticPortConfig, // Pre-allocated ports with HostPort
-	volumes []VolumeConfig,
-	env map[string]string,
-	cpuRequest, memoryRequest string,
-	pvcName string,
-	labels map[string]string,
-	healthCheck *HealthCheckConfig,
-) error {
-
-	// Build environment variables
-	var envVars []corev1.EnvVar
-	for key, value := range env {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  key,
-			Value: value,
-		})
-	}
-
-	// Build Agones ports with STATIC policy and pre-allocated host ports
-	var gameServerPorts []agonesv1.GameServerPort
-	for _, port := range ports {
-		gameServerPorts = append(gameServerPorts, agonesv1.GameServerPort{
-			Name:          port.Name,
-			PortPolicy:    agonesv1.Static, // Static port policy
-			ContainerPort: port.ContainerPort,
-			HostPort:      port.HostPort, // Pre-allocated host port
-			Protocol:      port.Protocol,
-		})
-	}
-
-	// Build volume mounts from multiple volumes (all using same PVC)
-	var volumeMounts []corev1.VolumeMount
-	for _, vol := range volumes {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "server-data",
-			MountPath: vol.MountPath,
-			SubPath:   vol.SubPath,
-		})
-	}
-
-	// Single PVC volume
-	podVolumes := []corev1.Volume{
-		{
-			Name: "server-data",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-				},
-			},
-		},
-	}
-
-	// Apply overhead factor to resource requests (reserve capacity for system)
-	cpuQty := resource.MustParse(cpuRequest)
-	memQty := resource.MustParse(memoryRequest)
-	adjustedCPU := resource.NewMilliQuantity(int64(float64(cpuQty.MilliValue())*ResourceOverheadFactor), resource.DecimalSI)
-	adjustedMemory := resource.NewQuantity(int64(float64(memQty.Value())*ResourceOverheadFactor), resource.BinarySI)
-
-	// Build containers slice with game server and optional sidecar
-	containers := []corev1.Container{
-		{
-			Name:         "game",
-			Image:        image,
-			Env:          envVars,
-			VolumeMounts: volumeMounts,
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    *adjustedCPU,
-					corev1.ResourceMemory: *adjustedMemory,
-				},
-			},
-		},
-	}
-
-	// Add Agones SDK sidecar if health check is configured
-	if healthCheck != nil {
-		sidecarContainer := buildAgonesSidecarContainer(healthCheck)
-		containers = append(containers, sidecarContainer)
-	}
-
-	gs := &agonesv1.GameServer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
-		},
-		Spec: agonesv1.GameServerSpec{
-			Ports:     gameServerPorts,
-			Container: "game",
-			Health:    agonesv1.Health{Disabled: true},
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					ServiceAccountName: "agones-sdk",
-					DNSConfig: &corev1.PodDNSConfig{
-						Options: []corev1.PodDNSConfigOption{
-							{
-								Name:  "ndots",
-								Value: func() *string { s := "2"; return &s }(),
-							},
-						},
-					},
-					// Hard node affinity: Pin to the specific node where port is allocated
-					Affinity: &corev1.Affinity{
-						NodeAffinity: &corev1.NodeAffinity{
-							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-								NodeSelectorTerms: []corev1.NodeSelectorTerm{
-									{
-										MatchExpressions: []corev1.NodeSelectorRequirement{
-											{
-												// Pin to specific node by hostname
-												Key:      "kubernetes.io/hostname",
-												Operator: corev1.NodeSelectorOpIn,
-												Values:   []string{nodeName},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-					Containers: containers,
-					Volumes:    podVolumes,
-				},
-			},
-		},
-	}
-
-	_, err := c.agonesClientset.AgonesV1().GameServers(namespace).Create(ctx, gs, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create GameServer with static ports: %w", err)
-	}
-
-	return nil
-}
-
-// buildAgonesSidecarContainer creates the Agones SDK sidecar container
-func buildAgonesSidecarContainer(healthCheck *HealthCheckConfig) corev1.Container {
-	return corev1.Container{
-		Name:            "agones-sidecar",
-		Image:           "dasior/port-health-check:v1.0.0",
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Env: []corev1.EnvVar{
-			{
-				Name:  "HEALTH_CHECK_TYPE",
-				Value: healthCheck.Type,
-			},
-			{
-				Name:  "HEALTH_CHECK_PORT",
-				Value: healthCheck.Port,
-			},
-			{
-				Name:  "HEALTH_CHECK_PROTOCOL",
-				Value: healthCheck.Protocol,
-			},
-			{
-				Name:  "HEALTH_CHECK_INITIAL_DELAY",
-				Value: healthCheck.InitialDelay,
-			},
-			{
-				Name:  "HEALTH_CHECK_TIMEOUT",
-				Value: healthCheck.Timeout,
-			},
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("128Mi"),
-			},
-		},
-	}
-}
-
-// GetGameServer retrieves a single GameServer
-func (c *Client) GetGameServer(ctx context.Context, namespace, name string) (*agonesv1.GameServer, error) {
-	gs, err := c.agonesClientset.AgonesV1().GameServers(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get GameServer: %w", err)
-	}
-	return gs, nil
-}
-
-// ListGameServers lists all GameServers in a namespace
-func (c *Client) ListGameServers(ctx context.Context, namespace string) ([]agonesv1.GameServer, error) {
-	list, err := c.agonesClientset.AgonesV1().GameServers(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list GameServers: %w", err)
-	}
-	return list.Items, nil
-}
-
-// DeleteGameServer deletes a GameServer
-func (c *Client) DeleteGameServer(ctx context.Context, namespace, name string) error {
-	err := c.agonesClientset.AgonesV1().GameServers(namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete GameServer: %w", err)
-	}
-	return nil
-}
-
 // DeletePVC deletes a PersistentVolumeClaim
 func (c *Client) DeletePVC(ctx context.Context, namespace, name string) error {
 	err := c.clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, name, metav1.DeleteOptions{})
@@ -517,27 +129,28 @@ func (c *Client) ListNodes(ctx context.Context) ([]corev1.Node, error) {
 	return list.Items, nil
 }
 
-// WaitForGameServerReady polls GameServer until Ready state or timeout
-func (c *Client) WaitForGameServerReady(ctx context.Context, namespace, name string, timeout time.Duration) (*agonesv1.GameServer, error) {
-	deadline := time.Now().Add(timeout)
-
-	for {
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for GameServer to be ready")
-		}
-
-		gs, err := c.GetGameServer(ctx, namespace, name)
-		if err != nil {
-			return nil, err
-		}
-
-		if gs.Status.State == agonesv1.GameServerStateReady {
-			return gs, nil
-		}
-
-		// Wait before next check
-		time.Sleep(5 * time.Second)
+// GetPodByLabel finds a pod by label selector, returns the first running pod found
+func (c *Client) GetPodByLabel(ctx context.Context, namespace, labelSelector string) (*corev1.Pod, error) {
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+
+	// Find a running pod
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			return &pod, nil
+		}
+	}
+
+	// If no running pod, return the first one (might be starting)
+	if len(pods.Items) > 0 {
+		return &pods.Items[0], nil
+	}
+
+	return nil, fmt.Errorf("no pods found with label: %s", labelSelector)
 }
 
 // StreamPodLogs returns a streaming io.ReadCloser for real-time log following.
@@ -557,4 +170,217 @@ func (c *Client) StreamPodLogs(ctx context.Context, namespace, podName, containe
 	}
 
 	return stream, nil
+}
+
+// DeploymentParams holds parameters for creating a game server Deployment
+type DeploymentParams struct {
+	Namespace   string
+	Name        string
+	Image       string
+	NodeName    string
+	Ports       []StaticPortConfig
+	Volumes     []VolumeConfig
+	Env         map[string]string
+	CPURequest  string
+	MemRequest  string
+	PVCName     string
+	Labels      map[string]string
+	GracePeriod int32
+}
+
+// CreateGameDeployment creates a Kubernetes Deployment for a game server with supervisor
+func (c *Client) CreateGameDeployment(ctx context.Context, params DeploymentParams) error {
+	// Build environment variables
+	var envVars []corev1.EnvVar
+	for key, value := range params.Env {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  key,
+			Value: value,
+		})
+	}
+
+	// Build container ports with hostPort
+	var containerPorts []corev1.ContainerPort
+	for _, port := range params.Ports {
+		containerPorts = append(containerPorts, corev1.ContainerPort{
+			Name:          port.Name,
+			ContainerPort: port.ContainerPort,
+			HostPort:      port.HostPort,
+			Protocol:      port.Protocol,
+		})
+	}
+
+	// Build volume mounts
+	var volumeMounts []corev1.VolumeMount
+	for _, vol := range params.Volumes {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "server-data",
+			MountPath: vol.MountPath,
+			SubPath:   vol.SubPath,
+		})
+	}
+
+	// Single PVC volume
+	podVolumes := []corev1.Volume{
+		{
+			Name: "server-data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: params.PVCName,
+				},
+			},
+		},
+	}
+
+	// Apply overhead factor to resource requests
+	cpuQty := resource.MustParse(params.CPURequest)
+	memQty := resource.MustParse(params.MemRequest)
+	adjustedCPU := resource.NewMilliQuantity(int64(float64(cpuQty.MilliValue())*ResourceOverheadFactor), resource.DecimalSI)
+	adjustedMemory := resource.NewQuantity(int64(float64(memQty.Value())*ResourceOverheadFactor), resource.BinarySI)
+
+	replicas := int32(1)
+	gracePeriod := int64(params.GracePeriod)
+	if gracePeriod == 0 {
+		gracePeriod = 30
+	}
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      params.Name,
+			Namespace: params.Namespace,
+			Labels:    params.Labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: params.Labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: params.Labels,
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName:            "gshub-supervisor",
+					TerminationGracePeriodSeconds: &gracePeriod,
+					DNSConfig: &corev1.PodDNSConfig{
+						Options: []corev1.PodDNSConfigOption{
+							{
+								Name:  "ndots",
+								Value: func() *string { s := "2"; return &s }(),
+							},
+						},
+					},
+					// Hard node affinity: Pin to the specific node where port is allocated
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												Key:      "kubernetes.io/hostname",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{params.NodeName},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:         "supervisor",
+							Image:        params.Image,
+							Env:          envVars,
+							Ports:        containerPorts,
+							VolumeMounts: volumeMounts,
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    *adjustedCPU,
+									corev1.ResourceMemory: *adjustedMemory,
+								},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromInt(8080),
+									},
+								},
+								InitialDelaySeconds: 10,
+								PeriodSeconds:       10,
+								FailureThreshold:    3,
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/readyz",
+										Port: intstr.FromInt(8080),
+									},
+								},
+								InitialDelaySeconds: 30,
+								PeriodSeconds:       15,
+								FailureThreshold:    2,
+							},
+						},
+					},
+					Volumes: podVolumes,
+				},
+			},
+		},
+	}
+
+	_, err := c.clientset.AppsV1().Deployments(params.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create Deployment: %w", err)
+	}
+
+	return nil
+}
+
+// GetGameDeployment retrieves a game server Deployment
+func (c *Client) GetGameDeployment(ctx context.Context, namespace, name string) (*appsv1.Deployment, error) {
+	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Deployment: %w", err)
+	}
+	return deployment, nil
+}
+
+// DeleteGameDeployment deletes a game server Deployment
+func (c *Client) DeleteGameDeployment(ctx context.Context, namespace, name string) error {
+	err := c.clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete Deployment: %w", err)
+	}
+	return nil
+}
+
+// ScaleGameDeployment scales a Deployment to the specified number of replicas
+func (c *Client) ScaleGameDeployment(ctx context.Context, namespace, name string, replicas int32) error {
+	scale, err := c.clientset.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get Deployment scale: %w", err)
+	}
+
+	scale.Spec.Replicas = replicas
+	_, err = c.clientset.AppsV1().Deployments(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to scale Deployment: %w", err)
+	}
+
+	return nil
+}
+
+// DeploymentExists checks if a Deployment exists
+func (c *Client) DeploymentExists(ctx context.Context, namespace, name string) (bool, error) {
+	_, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check Deployment: %w", err)
+	}
+	return true, nil
 }

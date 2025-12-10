@@ -1,0 +1,36 @@
+# Enshrouded Supervisor Image
+# Combines the supervisor binary with Wine and Enshrouded server
+
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the supervisor binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o supervisor ./cmd/supervisor
+
+# Final stage - Wine-based for Windows game server
+FROM scottyhardy/docker-wine:latest
+
+# Install supervisor
+COPY --from=builder /build/supervisor /usr/local/bin/supervisor
+
+# Create game directory
+RUN mkdir -p /game/savegame
+
+# The supervisor will start the Enshrouded server via Wine
+ENV GSHUB_START_COMMAND='["wine", "/game/enshrouded_server.exe"]'
+ENV GSHUB_WORK_DIR=/game
+ENV GSHUB_GRACE_PERIOD=45
+ENV GSHUB_HEALTH_TYPE=port
+ENV GSHUB_HEALTH_PORT=15636
+ENV GSHUB_HEALTH_PROTOCOL=UDP
+
+# Override the default entrypoint
+ENTRYPOINT ["/usr/local/bin/supervisor"]
